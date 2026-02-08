@@ -148,12 +148,13 @@ def wait_for_connection_file(
     path: str | Path, timeout: int = 60
 ) -> dict[str, str]:
     """Wait for connection file to appear and have content."""
+    p = Path(path)
+    required_keys = {"HOSTNAME", "PORT", "TOKEN"}
     start = time.time()
     while time.time() - start < timeout:
-        p = Path(path)
         if p.exists() and p.stat().st_size > 0:
             info = parse_connection_file(p)
-            if "HOSTNAME" in info and "PORT" in info and "TOKEN" in info:
+            if required_keys <= info.keys():
                 return info
         time.sleep(2)
     raise TimeoutError(f"Connection file {path} not ready within {timeout}s")

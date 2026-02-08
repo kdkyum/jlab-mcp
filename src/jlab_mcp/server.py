@@ -10,8 +10,6 @@ from pathlib import Path
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 
-logger = logging.getLogger("jlab-mcp")
-
 from jlab_mcp import config
 from jlab_mcp.jupyter_client import JupyterLabClient
 from jlab_mcp.notebook import NotebookManager
@@ -23,6 +21,8 @@ from jlab_mcp.slurm import (
     wait_for_connection_file,
     wait_for_job_running,
 )
+
+logger = logging.getLogger("jlab-mcp")
 
 mcp = FastMCP("jlab-mcp")
 
@@ -43,26 +43,31 @@ class Session:
 sessions: dict[str, Session] = {}
 
 
+def _cleanup_session_resources(session: Session) -> None:
+    """Shut down kernel, cancel SLURM job, and remove connection file."""
+    try:
+        session.jupyter_client.shutdown_kernel(session.kernel_id)
+    except Exception:
+        pass
+    try:
+        cancel_job(session.job_id)
+    except Exception:
+        pass
+    try:
+        if session.connection_file:
+            cleanup_connection_file(session.connection_file)
+    except Exception:
+        pass
+
+
 def _cleanup_all_sessions():
     """Cancel all SLURM jobs and clean up on exit."""
     if not sessions:
         return
     logger.info(f"Cleaning up {len(sessions)} active session(s)...")
     for sid, session in list(sessions.items()):
-        try:
-            session.jupyter_client.shutdown_kernel(session.kernel_id)
-        except Exception:
-            pass
-        try:
-            cancel_job(session.job_id)
-            logger.info(f"Cancelled SLURM job {session.job_id} (session {sid})")
-        except Exception:
-            pass
-        try:
-            if session.connection_file:
-                cleanup_connection_file(session.connection_file)
-        except Exception:
-            pass
+        _cleanup_session_resources(session)
+        logger.info(f"Cancelled SLURM job {session.job_id} (session {sid})")
     sessions.clear()
 
 
@@ -164,6 +169,38 @@ def _wait_for_jupyter(client: JupyterLabClient, timeout: int = 120) -> None:
     )
 
 
+def _register_session(
+    job_id: str,
+    kernel_id: str,
+    client: JupyterLabClient,
+    nb_path: Path,
+    nb_manager: NotebookManager,
+    hostname: str,
+    conn_file: str,
+) -> Session:
+    """Create a Session, register it in the global store, and return it."""
+    session_id = str(uuid.uuid4())[:8]
+    session = Session(
+        session_id=session_id,
+        job_id=job_id,
+        kernel_id=kernel_id,
+        jupyter_client=client,
+        notebook_path=nb_path,
+        notebook_manager=nb_manager,
+        hostname=hostname,
+        connection_file=conn_file,
+    )
+    sessions[session_id] = session
+    return session
+
+
+def _get_session(session_id: str) -> Session:
+    """Look up a session by ID or raise ValueError."""
+    if session_id not in sessions:
+        raise ValueError(f"Unknown session: {session_id}")
+    return sessions[session_id]
+
+
 @mcp.tool()
 def start_new_session(experiment_name: str) -> dict:
     """Start a new session: submit SLURM job, start kernel, create notebook.
@@ -179,21 +216,11 @@ def start_new_session(experiment_name: str) -> dict:
     nb_manager = NotebookManager()
     nb_path = nb_manager.create_notebook(experiment_name, config.NOTEBOOK_DIR)
 
-    session_id = str(uuid.uuid4())[:8]
-    session = Session(
-        session_id=session_id,
-        job_id=job_id,
-        kernel_id=kernel_id,
-        jupyter_client=client,
-        notebook_path=nb_path,
-        notebook_manager=nb_manager,
-        hostname=hostname,
-        connection_file=conn_file,
+    session = _register_session(
+        job_id, kernel_id, client, nb_path, nb_manager, hostname, conn_file
     )
-    sessions[session_id] = session
-
     return {
-        "session_id": session_id,
+        "session_id": session.session_id,
         "notebook_path": str(nb_path),
         "job_id": job_id,
         "hostname": hostname,
@@ -214,7 +241,6 @@ def start_session_resume_notebook(
         Dict with session_id, notebook_path, job_id, hostname, errors.
     """
     nb_path = _validate_notebook_path(notebook_path)
-
     job_id, kernel_id, client, hostname, conn_file = _setup_slurm_and_kernel()
 
     nb_manager = NotebookManager()
@@ -224,21 +250,11 @@ def start_session_resume_notebook(
 
     errors = nb_manager.restore_notebook(nb_path, execute_fn)
 
-    session_id = str(uuid.uuid4())[:8]
-    session = Session(
-        session_id=session_id,
-        job_id=job_id,
-        kernel_id=kernel_id,
-        jupyter_client=client,
-        notebook_path=nb_path,
-        notebook_manager=nb_manager,
-        hostname=hostname,
-        connection_file=conn_file,
+    session = _register_session(
+        job_id, kernel_id, client, nb_path, nb_manager, hostname, conn_file
     )
-    sessions[session_id] = session
-
     return {
-        "session_id": session_id,
+        "session_id": session.session_id,
         "notebook_path": str(nb_path),
         "job_id": job_id,
         "hostname": hostname,
@@ -260,27 +276,16 @@ def start_session_continue_notebook(
         Dict with session_id, notebook_path (forked), job_id, hostname.
     """
     nb_path = _validate_notebook_path(notebook_path)
-
     job_id, kernel_id, client, hostname, conn_file = _setup_slurm_and_kernel()
 
     nb_manager = NotebookManager()
     forked_path = nb_manager.copy_notebook(nb_path, suffix="_continued")
 
-    session_id = str(uuid.uuid4())[:8]
-    session = Session(
-        session_id=session_id,
-        job_id=job_id,
-        kernel_id=kernel_id,
-        jupyter_client=client,
-        notebook_path=forked_path,
-        notebook_manager=nb_manager,
-        hostname=hostname,
-        connection_file=conn_file,
+    session = _register_session(
+        job_id, kernel_id, client, forked_path, nb_manager, hostname, conn_file
     )
-    sessions[session_id] = session
-
     return {
-        "session_id": session_id,
+        "session_id": session.session_id,
         "notebook_path": str(forked_path),
         "original_notebook": str(nb_path),
         "job_id": job_id,
@@ -299,10 +304,7 @@ def execute_code(session_id: str, code: str) -> str:
     Returns:
         Formatted output string.
     """
-    if session_id not in sessions:
-        raise ValueError(f"Unknown session: {session_id}")
-
-    session = sessions[session_id]
+    session = _get_session(session_id)
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.add_code_cell(
         session.notebook_path, code, outputs
@@ -322,10 +324,7 @@ def edit_cell(session_id: str, cell_index: int, code: str) -> str:
     Returns:
         Formatted output string.
     """
-    if session_id not in sessions:
-        raise ValueError(f"Unknown session: {session_id}")
-
-    session = sessions[session_id]
+    session = _get_session(session_id)
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.edit_cell(
         session.notebook_path, cell_index, code, outputs
@@ -344,10 +343,7 @@ def add_markdown(session_id: str, markdown: str) -> str:
     Returns:
         Confirmation with cell index.
     """
-    if session_id not in sessions:
-        raise ValueError(f"Unknown session: {session_id}")
-
-    session = sessions[session_id]
+    session = _get_session(session_id)
     cell_idx = session.notebook_manager.add_markdown_cell(
         session.notebook_path, markdown
     )
@@ -364,26 +360,11 @@ def shutdown_session(session_id: str) -> str:
     Returns:
         Confirmation message.
     """
-    if session_id not in sessions:
-        raise ValueError(f"Unknown session: {session_id}")
-
+    _get_session(session_id)
     session = sessions.pop(session_id)
     logger.info(f"Shutting down session {session_id} (job={session.job_id}, host={session.hostname})")
-    try:
-        session.jupyter_client.shutdown_kernel(session.kernel_id)
-        logger.info(f"Kernel {session.kernel_id} stopped")
-    except Exception:
-        pass
-    try:
-        cancel_job(session.job_id)
-        logger.info(f"SLURM job {session.job_id} cancelled")
-    except Exception:
-        pass
-    try:
-        if session.connection_file:
-            cleanup_connection_file(session.connection_file)
-    except Exception:
-        pass
+    _cleanup_session_resources(session)
+    logger.info(f"Kernel {session.kernel_id} stopped, SLURM job {session.job_id} cancelled")
 
     return (
         f"Session {session_id} shutdown successfully. "

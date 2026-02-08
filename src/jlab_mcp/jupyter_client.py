@@ -89,6 +89,13 @@ class JupyterLabClient:
         finally:
             ws.close()
 
+    @staticmethod
+    def _resize_png(png_base64: str) -> dict:
+        """Decode, resize, and re-encode a base64 PNG image."""
+        image_data = base64.b64decode(png_base64)
+        resized = resize_image_if_needed(image_data)
+        return {"type": "image", "content": base64.b64encode(resized).decode()}
+
     def _execute_on_ws(
         self, ws: websocket.WebSocket, code: str, timeout: int
     ) -> list[dict]:
@@ -128,7 +135,7 @@ class JupyterLabClient:
             if parent_msg_id != msg_id:
                 continue
 
-            msg_type = msg.get("msg_type", "") or msg.get("header", {}).get(
+            msg_type = msg.get("msg_type") or msg.get("header", {}).get(
                 "msg_type", ""
             )
 
@@ -144,26 +151,12 @@ class JupyterLabClient:
                         {"type": "text", "content": data["text/plain"]}
                     )
                 if "image/png" in data:
-                    image_data = base64.b64decode(data["image/png"])
-                    resized = resize_image_if_needed(image_data)
-                    outputs.append(
-                        {
-                            "type": "image",
-                            "content": base64.b64encode(resized).decode(),
-                        }
-                    )
+                    outputs.append(self._resize_png(data["image/png"]))
 
             elif msg_type == "display_data":
                 data = msg["content"].get("data", {})
                 if "image/png" in data:
-                    image_data = base64.b64decode(data["image/png"])
-                    resized = resize_image_if_needed(image_data)
-                    outputs.append(
-                        {
-                            "type": "image",
-                            "content": base64.b64encode(resized).decode(),
-                        }
-                    )
+                    outputs.append(self._resize_png(data["image/png"]))
                 elif "text/plain" in data:
                     outputs.append(
                         {"type": "text", "content": data["text/plain"]}
@@ -180,8 +173,7 @@ class JupyterLabClient:
                 )
 
             elif msg_type == "status":
-                state = msg["content"].get("execution_state", "")
-                if state == "idle":
+                if msg["content"].get("execution_state") == "idle":
                     break
 
         return outputs

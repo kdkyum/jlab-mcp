@@ -201,7 +201,11 @@ If the code produces a plot (`plt.show()` with `%matplotlib inline`):
 
 The code and outputs are appended as a cell to `my_experiment.ipynb` on the shared filesystem.
 
-## 4. Claude Calls `shutdown_session`
+## 4. Shutdown and Cleanup
+
+There are two ways sessions end:
+
+### 4a. Explicit: Claude Calls `shutdown_session`
 
 ```python
 requests.delete("http://ravg1011:18432/api/kernels/kernel-uuid-1234")  # kill kernel
@@ -210,6 +214,26 @@ Path("~/.jlab-mcp/connections/jupyter-18432.conn").unlink()             # delete
 ```
 
 The compute node is released back to the SLURM pool.
+
+### 4b. Implicit: User Quits Claude Code
+
+When the user exits Claude Code (Ctrl+C, `/exit`, or closes the terminal):
+
+1. Claude Code kills the `jlab-mcp` child process (sends SIGTERM)
+2. The MCP server's **signal handler** catches SIGTERM
+3. It iterates over all active sessions and runs `scancel` for each SLURM job
+4. Connection files are deleted, then the process exits
+
+```python
+# Registered at startup:
+atexit.register(_cleanup_all_sessions)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
+```
+
+This prevents orphaned SLURM jobs from wasting GPU time after Claude Code exits.
+
+> **Note:** The only case cleanup won't happen is `kill -9` (SIGKILL), which cannot be intercepted. In that case, the SLURM job runs until its walltime expires.
 
 ## Summary Diagram
 
