@@ -11,12 +11,27 @@ Claude Code (login node)
     ↕ stdio
 MCP Server (login node)
     ↕ HTTP/WebSocket
-JupyterLab (compute node, via sbatch)
+JupyterLab (compute node, via sbatch)   ← one SLURM job, many kernels
     ↕
-IPython Kernel (GPU access)
+IPython Kernels (GPU access)
 ```
 
-Login and compute nodes share a filesystem. The MCP server submits a SLURM job that starts JupyterLab on a compute node, then communicates with it over HTTP/WebSocket. Connection info (hostname, port, token) is exchanged via a file on the shared filesystem.
+Login and compute nodes share a filesystem. The MCP server submits a **single SLURM job** that starts JupyterLab on a compute node. All sessions create separate kernels on this shared server. Connection info (hostname, port, token) is exchanged via a file on the shared filesystem.
+
+### Eager Startup
+
+The SLURM job is submitted **immediately** when Claude Code starts the MCP server (in a background thread). By the time you make your first request, the compute node is often already running. Progress is logged to stderr:
+
+```
+[jlab-mcp] SLURM job 24215408 submitted (port=18432), waiting for compute node...
+[jlab-mcp] SLURM job 24215408 running on ravg1011
+[jlab-mcp] Waiting for JupyterLab at http://ravg1011:18432...
+[jlab-mcp] JupyterLab ready at http://ravg1011:18432
+```
+
+### Server Death Detection
+
+If the SLURM job terminates (walltime, preemption, node failure), the next session start automatically detects this and submits a new SLURM job.
 
 ## Setup
 
@@ -89,15 +104,22 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 
 | Tool | Description |
 |---|---|
-| `start_new_session` | Submit SLURM job, start kernel, create empty notebook |
-| `start_session_resume_notebook` | Resume existing notebook (re-executes all cells) |
-| `start_session_continue_notebook` | Fork notebook with fresh kernel |
-| `execute_code` | Run Python code, append cell to notebook |
+| `start_new_session` | Start kernel on shared server, create empty notebook |
+| `start_session_resume_notebook` | Resume existing notebook (re-executes all cells to restore state) |
+| `start_session_continue_notebook` | Fork notebook with fresh kernel (no re-execution) |
+| `execute_code` | Run Python code, append cell to notebook (returns text + images) |
 | `edit_cell` | Edit and re-execute a cell (supports negative indexing) |
 | `add_markdown` | Add markdown cell to notebook |
-| `shutdown_session` | Stop kernel, cancel SLURM job, clean up |
+| `shutdown_session` | Stop kernel (SLURM job stays alive for other sessions) |
 
-Resource: `jlab-mcp://server/status` — returns active sessions and job states.
+Resource: `jlab-mcp://server/status` — returns shared server info and active sessions.
+
+### Session Lifecycle
+
+- **First `start_new_session`**: Waits for the background SLURM job (usually already running)
+- **Subsequent sessions**: Instant — just creates a new kernel on the same server
+- **`shutdown_session`**: Kills the kernel only. The SLURM job keeps running.
+- **User exits Claude Code**: Signal handler cancels the SLURM job and cleans up all sessions
 
 ## Testing
 
@@ -106,7 +128,7 @@ Resource: `jlab-mcp://server/status` — returns active sessions and job states.
 uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_image_utils.py -v
 
 # Integration tests (requires SLURM cluster)
-uv run python -m pytest tests/test_tools.py -v -s --timeout=300
+uv run python -m pytest tests/test_tools.py -v -s --timeout=600
 ```
 
 ## Acknowledgments

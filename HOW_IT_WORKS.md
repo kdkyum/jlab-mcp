@@ -20,13 +20,33 @@ Claude Code spawns the process: `jlab-mcp` (the entry point from `pyproject.toml
 This runs `__main__.py`:
 
 ```python
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 start_jupyter_background()   # submit SLURM job immediately
 mcp.run(transport="stdio")   # start MCP server
 ```
 
-The FastMCP server starts and communicates with Claude Code over **stdin/stdout pipes**. It advertises 7 tools + 1 resource.
+Two things happen:
 
-**Immediately**, a background thread submits the SLURM job so the compute node is warming up while Claude Code completes its handshake. By the time the user makes their first request, the JupyterLab server is often already running.
+1. **Logging to stderr** — All status messages are written to stderr (stdout is reserved for MCP protocol). Claude Code captures and displays stderr from MCP servers.
+2. **Background SLURM submission** — A background thread immediately submits the SLURM job so the compute node is warming up while Claude Code completes its handshake.
+
+The FastMCP server starts and communicates with Claude Code over **stdin/stdout pipes**. It advertises 7 tools + 1 resource. By the time the user makes their first request, the JupyterLab server is often already running.
+
+### What the User Sees (in Claude Code MCP logs)
+
+```
+2025-01-15 10:32:01 [jlab-mcp] SLURM job 24215408 submitted (port=18432), waiting for compute node...
+2025-01-15 10:32:15 [jlab-mcp] SLURM job 24215408 running on ravg1011
+2025-01-15 10:32:15 [jlab-mcp] Waiting for JupyterLab at http://ravg1011:18432...
+2025-01-15 10:32:22 [jlab-mcp] JupyterLab ready at http://ravg1011:18432
+```
+
+If the SLURM job terminates (e.g., walltime reached):
+
+```
+2025-01-15 14:32:01 [jlab-mcp] JupyterLab server (job 24215408) terminated. All existing sessions are lost. Starting a new server...
+2025-01-15 14:32:02 [jlab-mcp] SLURM job 24215500 submitted (port=18501), waiting for compute node...
+```
 
 ## 2. Shared JupyterLab Server
 
