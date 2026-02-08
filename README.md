@@ -21,13 +21,17 @@ Login and compute nodes share a filesystem. The MCP server submits a SLURM job t
 ## Setup
 
 ```bash
-# Clone and install
-git clone https://github.com/kdkyum/jlab-mcp.git
-cd jlab-mcp
-uv sync
+# Install (no git clone needed)
+uv tool install git+https://github.com/kdkyum/jlab-mcp.git
+```
 
-# Install PyTorch separately (GPU support, not in pyproject.toml)
-uv pip install torch --index-url https://download.pytorch.org/whl/cu126
+The SLURM job activates `.venv` in the **current working directory**. Set up your project's venv on the shared filesystem with the compute dependencies:
+
+```bash
+cd /shared/fs/my-project
+uv venv
+uv pip install jupyterlab ipykernel matplotlib numpy
+uv pip install torch --index-url https://download.pytorch.org/whl/cu126  # GPU support
 ```
 
 ## Configuration
@@ -68,8 +72,7 @@ Add to `~/.claude.json` or project `.mcp.json`:
 {
   "mcpServers": {
     "jlab-mcp": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/jlab-mcp", "python", "-m", "jlab_mcp"],
+      "command": "jlab-mcp",
       "env": {
         "JLAB_MCP_SLURM_PARTITION": "gpu1",
         "JLAB_MCP_SLURM_GRES": "gpu:a100:1",
@@ -79,6 +82,8 @@ Add to `~/.claude.json` or project `.mcp.json`:
   }
 }
 ```
+
+The MCP server uses the working directory to find `.venv` for the compute node. Claude Code launches from your project directory, so it picks up the right venv automatically.
 
 ## MCP Tools
 

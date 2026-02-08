@@ -1,3 +1,4 @@
+import importlib.resources
 import os
 from pathlib import Path
 
@@ -46,8 +47,10 @@ PORT_RANGE = (
     _get_int("JLAB_MCP_PORT_MAX", 19000),
 )
 
-# Project directory (for venv activation in SLURM script)
-PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
+# Working directory — the .venv here is activated on the compute node
+PROJECT_DIR = Path.cwd()
 
-# Template path
-TEMPLATE_DIR = PROJECT_DIR / "templates"
+
+def get_template_content() -> str:
+    """Read the bundled SLURM template from package data."""
+    return importlib.resources.read_text("jlab_mcp", "jupyter_slurm.sh.template")

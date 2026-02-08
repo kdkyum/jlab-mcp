@@ -36,8 +36,7 @@ def render_slurm_script(
     log_dir: str | None = None,
     project_dir: str | None = None,
 ) -> str:
-    template_path = config.TEMPLATE_DIR / "jupyter_slurm.sh.template"
-    template = template_path.read_text()
+    template = config.get_template_content()
     return template.format(
         port=port,
         token=token,
