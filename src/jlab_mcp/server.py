@@ -1,0 +1,354 @@
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastmcp import FastMCP
+
+from jlab_mcp import config
+from jlab_mcp.jupyter_client import JupyterLabClient
+from jlab_mcp.notebook import NotebookManager
+from jlab_mcp.slurm import (
+    cancel_job,
+    cleanup_connection_file,
+    is_job_running,
+    submit_job,
+    wait_for_connection_file,
+    wait_for_job_running,
+)
+
+mcp = FastMCP("jlab-mcp")
+
+
+@dataclass
+class Session:
+    session_id: str
+    job_id: str
+    kernel_id: str
+    jupyter_client: JupyterLabClient
+    notebook_path: Path
+    notebook_manager: NotebookManager
+    hostname: str = ""
+    connection_file: str = ""
+
+
+# Global session store
+sessions: dict[str, Session] = {}
+
+
+def _validate_notebook_path(notebook_path: str) -> Path:
+    """Validate that notebook_path is within NOTEBOOK_DIR to prevent traversal."""
+    nb_path = Path(notebook_path).resolve()
+    notebook_dir = config.NOTEBOOK_DIR.resolve()
+    if not str(nb_path).startswith(str(notebook_dir)):
+        raise ValueError(
+            f"Notebook path must be within {notebook_dir}, "
+            f"got: {notebook_path}"
+        )
+    if not nb_path.exists():
+        raise FileNotFoundError(f"Notebook not found: {notebook_path}")
+    return nb_path
+
+
+def _format_outputs(outputs: list[dict]) -> str:
+    """Format kernel outputs into a readable string."""
+    parts: list[str] = []
+    for out in outputs:
+        if out["type"] == "text":
+            parts.append(out["content"])
+        elif out["type"] == "image":
+            parts.append(f"[Image: base64 PNG, {len(out['content'])} chars]")
+        elif out["type"] == "error":
+            tb = "\n".join(out.get("traceback", []))
+            parts.append(
+                f"Error: {out.get('ename', 'Error')}: "
+                f"{out.get('evalue', '')}\n{tb}"
+            )
+    return "".join(parts) if parts else "(no output)"
+
+
+def _setup_slurm_and_kernel() -> tuple[str, str, JupyterLabClient, str, str]:
+    """Submit SLURM job, wait for it, connect, start kernel.
+
+    Returns (job_id, kernel_id, client, hostname, connection_file).
+    """
+    job_id, conn_file, port, token = submit_job()
+
+    # Wait for SLURM job to start
+    hostname = wait_for_job_running(job_id, timeout=300)
+
+    # Wait for connection file
+    conn_info = wait_for_connection_file(conn_file, timeout=120)
+    actual_host = conn_info["HOSTNAME"]
+    actual_port = int(conn_info["PORT"])
+    actual_token = conn_info["TOKEN"]
+
+    # Create client and wait for JupyterLab to be ready
+    client = JupyterLabClient(actual_host, actual_port, actual_token)
+    _wait_for_jupyter(client, timeout=120)
+
+    # Start kernel
+    kernel_id = client.start_kernel()
+    # Give kernel a moment to initialize
+    time.sleep(2)
+
+    return job_id, kernel_id, client, actual_host, conn_file
+
+
+def _wait_for_jupyter(client: JupyterLabClient, timeout: int = 120) -> None:
+    """Poll until JupyterLab health check passes."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if client.health_check():
+            return
+        time.sleep(3)
+    raise TimeoutError(
+        f"JupyterLab not responding at {client.base_url} after {timeout}s"
+    )
+
+
+@mcp.tool()
+def start_new_session(experiment_name: str) -> dict:
+    """Start a new session: submit SLURM job, start kernel, create notebook.
+
+    Args:
+        experiment_name: Name for the experiment/notebook.
+
+    Returns:
+        Dict with session_id, notebook_path, job_id, hostname.
+    """
+    job_id, kernel_id, client, hostname, conn_file = _setup_slurm_and_kernel()
+
+    nb_manager = NotebookManager()
+    nb_path = nb_manager.create_notebook(experiment_name, config.NOTEBOOK_DIR)
+
+    session_id = str(uuid.uuid4())[:8]
+    session = Session(
+        session_id=session_id,
+        job_id=job_id,
+        kernel_id=kernel_id,
+        jupyter_client=client,
+        notebook_path=nb_path,
+        notebook_manager=nb_manager,
+        hostname=hostname,
+        connection_file=conn_file,
+    )
+    sessions[session_id] = session
+
+    return {
+        "session_id": session_id,
+        "notebook_path": str(nb_path),
+        "job_id": job_id,
+        "hostname": hostname,
+    }
+
+
+@mcp.tool()
+def start_session_resume_notebook(
+    experiment_name: str, notebook_path: str
+) -> dict:
+    """Resume a notebook: re-execute all cells to restore kernel state.
+
+    Args:
+        experiment_name: Name for this session.
+        notebook_path: Path to existing notebook to resume.
+
+    Returns:
+        Dict with session_id, notebook_path, job_id, hostname, errors.
+    """
+    nb_path = _validate_notebook_path(notebook_path)
+
+    job_id, kernel_id, client, hostname, conn_file = _setup_slurm_and_kernel()
+
+    nb_manager = NotebookManager()
+
+    def execute_fn(code: str) -> list[dict]:
+        return client.execute_code(kernel_id, code)
+
+    errors = nb_manager.restore_notebook(nb_path, execute_fn)
+
+    session_id = str(uuid.uuid4())[:8]
+    session = Session(
+        session_id=session_id,
+        job_id=job_id,
+        kernel_id=kernel_id,
+        jupyter_client=client,
+        notebook_path=nb_path,
+        notebook_manager=nb_manager,
+        hostname=hostname,
+        connection_file=conn_file,
+    )
+    sessions[session_id] = session
+
+    return {
+        "session_id": session_id,
+        "notebook_path": str(nb_path),
+        "job_id": job_id,
+        "hostname": hostname,
+        "restored_with_errors": errors if errors else None,
+    }
+
+
+@mcp.tool()
+def start_session_continue_notebook(
+    experiment_name: str, notebook_path: str
+) -> dict:
+    """Continue a notebook: fork it with fresh kernel (no re-execution).
+
+    Args:
+        experiment_name: Name for this session.
+        notebook_path: Path to existing notebook to fork.
+
+    Returns:
+        Dict with session_id, notebook_path (forked), job_id, hostname.
+    """
+    nb_path = _validate_notebook_path(notebook_path)
+
+    job_id, kernel_id, client, hostname, conn_file = _setup_slurm_and_kernel()
+
+    nb_manager = NotebookManager()
+    forked_path = nb_manager.copy_notebook(nb_path, suffix="_continued")
+
+    session_id = str(uuid.uuid4())[:8]
+    session = Session(
+        session_id=session_id,
+        job_id=job_id,
+        kernel_id=kernel_id,
+        jupyter_client=client,
+        notebook_path=forked_path,
+        notebook_manager=nb_manager,
+        hostname=hostname,
+        connection_file=conn_file,
+    )
+    sessions[session_id] = session
+
+    return {
+        "session_id": session_id,
+        "notebook_path": str(forked_path),
+        "original_notebook": str(nb_path),
+        "job_id": job_id,
+        "hostname": hostname,
+    }
+
+
+@mcp.tool()
+def execute_code(session_id: str, code: str) -> str:
+    """Execute code in the kernel and add cell to notebook.
+
+    Args:
+        session_id: Session identifier.
+        code: Python code to execute.
+
+    Returns:
+        Formatted output string.
+    """
+    if session_id not in sessions:
+        raise ValueError(f"Unknown session: {session_id}")
+
+    session = sessions[session_id]
+    outputs = session.jupyter_client.execute_code(session.kernel_id, code)
+    session.notebook_manager.add_code_cell(
+        session.notebook_path, code, outputs
+    )
+    return _format_outputs(outputs)
+
+
+@mcp.tool()
+def edit_cell(session_id: str, cell_index: int, code: str) -> str:
+    """Edit an existing cell, re-execute it, and update outputs.
+
+    Args:
+        session_id: Session identifier.
+        cell_index: Cell index (supports negative indexing).
+        code: New code for the cell.
+
+    Returns:
+        Formatted output string.
+    """
+    if session_id not in sessions:
+        raise ValueError(f"Unknown session: {session_id}")
+
+    session = sessions[session_id]
+    outputs = session.jupyter_client.execute_code(session.kernel_id, code)
+    session.notebook_manager.edit_cell(
+        session.notebook_path, cell_index, code, outputs
+    )
+    return _format_outputs(outputs)
+
+
+@mcp.tool()
+def add_markdown(session_id: str, markdown: str) -> str:
+    """Add a markdown cell to the notebook.
+
+    Args:
+        session_id: Session identifier.
+        markdown: Markdown content.
+
+    Returns:
+        Confirmation with cell index.
+    """
+    if session_id not in sessions:
+        raise ValueError(f"Unknown session: {session_id}")
+
+    session = sessions[session_id]
+    cell_idx = session.notebook_manager.add_markdown_cell(
+        session.notebook_path, markdown
+    )
+    return f"Added markdown cell at index {cell_idx}"
+
+
+@mcp.tool()
+def shutdown_session(session_id: str) -> str:
+    """Shutdown session: stop kernel and cancel SLURM job.
+
+    Args:
+        session_id: Session identifier.
+
+    Returns:
+        Confirmation message.
+    """
+    if session_id not in sessions:
+        raise ValueError(f"Unknown session: {session_id}")
+
+    session = sessions.pop(session_id)
+    try:
+        session.jupyter_client.shutdown_kernel(session.kernel_id)
+    except Exception:
+        pass
+    try:
+        cancel_job(session.job_id)
+    except Exception:
+        pass
+    try:
+        if session.connection_file:
+            cleanup_connection_file(session.connection_file)
+    except Exception:
+        pass
+
+    return (
+        f"Session {session_id} shutdown successfully. "
+        f"Notebook saved at {session.notebook_path}"
+    )
+
+
+@mcp.resource("jlab-mcp://server/status")
+def server_status() -> dict:
+    """Get server status: active sessions, job states."""
+    active = {}
+    for sid, session in sessions.items():
+        job_running = False
+        try:
+            job_running = is_job_running(session.job_id)
+        except Exception:
+            pass
+        active[sid] = {
+            "job_id": session.job_id,
+            "kernel_id": session.kernel_id,
+            "notebook_path": str(session.notebook_path),
+            "hostname": session.hostname,
+            "job_running": job_running,
+        }
+    return {
+        "active_sessions": len(sessions),
+        "sessions": active,
+    }
