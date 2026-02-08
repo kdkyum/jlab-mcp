@@ -21,8 +21,8 @@ def _get_int(env_key: str, default: int) -> int:
 # Base directory
 JLAB_MCP_DIR = _get_path("JLAB_MCP_DIR", "~/.jlab-mcp")
 
-# Notebook storage (shared FS)
-NOTEBOOK_DIR = _get_path("JLAB_MCP_NOTEBOOK_DIR", str(JLAB_MCP_DIR / "notebooks"))
+# Notebook storage (defaults to cwd/notebooks)
+NOTEBOOK_DIR = _get_path("JLAB_MCP_NOTEBOOK_DIR", str(Path.cwd() / "notebooks"))
 
 # SLURM job logs
 LOG_DIR = _get_path("JLAB_MCP_LOG_DIR", str(JLAB_MCP_DIR / "logs"))

@@ -41,7 +41,7 @@ All settings are configurable via environment variables. No values are hardcoded
 | Environment Variable | Default | Description |
 |---|---|---|
 | `JLAB_MCP_DIR` | `~/.jlab-mcp` | Base working directory |
-| `JLAB_MCP_NOTEBOOK_DIR` | `~/.jlab-mcp/notebooks` | Notebook storage |
+| `JLAB_MCP_NOTEBOOK_DIR` | `./notebooks` | Notebook storage (relative to cwd) |
 | `JLAB_MCP_LOG_DIR` | `~/.jlab-mcp/logs` | SLURM job logs |
 | `JLAB_MCP_CONNECTION_DIR` | `~/.jlab-mcp/connections` | Connection info files |
 | `JLAB_MCP_SLURM_PARTITION` | `gpu` | SLURM partition |
