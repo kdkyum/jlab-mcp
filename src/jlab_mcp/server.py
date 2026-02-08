@@ -1,5 +1,7 @@
+import atexit
 import base64
 import logging
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -39,6 +41,40 @@ class Session:
 
 # Global session store
 sessions: dict[str, Session] = {}
+
+
+def _cleanup_all_sessions():
+    """Cancel all SLURM jobs and clean up on exit."""
+    if not sessions:
+        return
+    logger.info(f"Cleaning up {len(sessions)} active session(s)...")
+    for sid, session in list(sessions.items()):
+        try:
+            session.jupyter_client.shutdown_kernel(session.kernel_id)
+        except Exception:
+            pass
+        try:
+            cancel_job(session.job_id)
+            logger.info(f"Cancelled SLURM job {session.job_id} (session {sid})")
+        except Exception:
+            pass
+        try:
+            if session.connection_file:
+                cleanup_connection_file(session.connection_file)
+        except Exception:
+            pass
+    sessions.clear()
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT by cleaning up sessions then exiting."""
+    _cleanup_all_sessions()
+    raise SystemExit(0)
+
+
+atexit.register(_cleanup_all_sessions)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def _validate_notebook_path(notebook_path: str) -> Path:
