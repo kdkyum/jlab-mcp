@@ -1,4 +1,5 @@
 import base64
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -6,6 +7,8 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
+
+logger = logging.getLogger("jlab-mcp")
 
 from jlab_mcp import config
 from jlab_mcp.jupyter_client import JupyterLabClient
@@ -86,9 +89,11 @@ def _setup_slurm_and_kernel() -> tuple[str, str, JupyterLabClient, str, str]:
     Returns (job_id, kernel_id, client, hostname, connection_file).
     """
     job_id, conn_file, port, token = submit_job()
+    logger.info(f"SLURM job {job_id} submitted (port={port}), waiting for it to start...")
 
     # Wait for SLURM job to start
     hostname = wait_for_job_running(job_id, timeout=300)
+    logger.info(f"SLURM job {job_id} is RUNNING on {hostname}")
 
     # Wait for connection file
     conn_info = wait_for_connection_file(conn_file, timeout=120)
@@ -98,12 +103,15 @@ def _setup_slurm_and_kernel() -> tuple[str, str, JupyterLabClient, str, str]:
 
     # Create client and wait for JupyterLab to be ready
     client = JupyterLabClient(actual_host, actual_port, actual_token)
+    logger.info(f"Waiting for JupyterLab at {actual_host}:{actual_port}...")
     _wait_for_jupyter(client, timeout=120)
+    logger.info(f"JupyterLab ready at {actual_host}:{actual_port}")
 
     # Start kernel
     kernel_id = client.start_kernel()
     # Give kernel a moment to initialize
     time.sleep(2)
+    logger.info(f"Kernel {kernel_id} started")
 
     return job_id, kernel_id, client, actual_host, conn_file
 
@@ -324,12 +332,15 @@ def shutdown_session(session_id: str) -> str:
         raise ValueError(f"Unknown session: {session_id}")
 
     session = sessions.pop(session_id)
+    logger.info(f"Shutting down session {session_id} (job={session.job_id}, host={session.hostname})")
     try:
         session.jupyter_client.shutdown_kernel(session.kernel_id)
+        logger.info(f"Kernel {session.kernel_id} stopped")
     except Exception:
         pass
     try:
         cancel_job(session.job_id)
+        logger.info(f"SLURM job {session.job_id} cancelled")
     except Exception:
         pass
     try:
