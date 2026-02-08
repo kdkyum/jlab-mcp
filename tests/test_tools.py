@@ -14,6 +14,8 @@ import time
 import pytest
 
 from jlab_mcp.server import (
+    _cleanup_all,
+    _server,
     add_markdown as _add_markdown,
     edit_cell as _edit_cell,
     execute_code as _execute_code,
@@ -48,6 +50,13 @@ def session():
         pass
 
 
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_shared_server():
+    """Cancel the shared SLURM job after all tests complete."""
+    yield
+    _cleanup_all()
+
+
 class TestStartNewSession:
     def test_returns_required_fields(self, session):
         assert "session_id" in session
@@ -69,7 +78,8 @@ class TestExecuteCode:
         result = execute_code(
             session_id=session["session_id"], code="print('hello world')"
         )
-        assert "hello world" in result
+        # Result is always a list now
+        assert any("hello world" in str(item) for item in result)
 
     def test_gpu_available(self, session):
         result = execute_code(
@@ -81,7 +91,8 @@ class TestExecuteCode:
                 "    print(f'GPU: {torch.cuda.get_device_name(0)}')"
             ),
         )
-        assert "CUDA available: True" in result
+        text = "".join(str(item) for item in result)
+        assert "CUDA available: True" in text
 
     def test_image_output(self, session):
         from fastmcp.utilities.types import Image
@@ -109,28 +120,32 @@ class TestExecuteCode:
 
     def test_error_handling(self, session):
         result = execute_code(session_id=session["session_id"], code="1/0")
-        assert "ZeroDivisionError" in result
+        text = "".join(str(item) for item in result)
+        assert "ZeroDivisionError" in text
 
     def test_state_persistence(self, session):
         execute_code(session_id=session["session_id"], code="x_persist = 42")
         result = execute_code(
             session_id=session["session_id"], code="print(x_persist)"
         )
-        assert "42" in result
+        text = "".join(str(item) for item in result)
+        assert "42" in text
 
     def test_large_output(self, session):
         result = execute_code(
             session_id=session["session_id"],
             code="for i in range(1000): print(f'line {i}')",
         )
-        assert "line 999" in result
+        text = "".join(str(item) for item in result)
+        assert "line 999" in text
 
     def test_long_running(self, session):
         result = execute_code(
             session_id=session["session_id"],
             code="import time; time.sleep(3); print('done sleeping')",
         )
-        assert "done sleeping" in result
+        text = "".join(str(item) for item in result)
+        assert "done sleeping" in text
 
 
 class TestEditCell:
@@ -141,7 +156,8 @@ class TestEditCell:
             cell_index=-1,
             code="y_edit = 20\nprint(y_edit)",
         )
-        assert "20" in result
+        text = "".join(str(item) for item in result)
+        assert "20" in text
 
     def test_edit_cell_negative_index(self, session):
         execute_code(session_id=session["session_id"], code="a_neg = 1")
@@ -151,7 +167,8 @@ class TestEditCell:
             cell_index=-2,
             code="a_neg = 100\nprint(a_neg)",
         )
-        assert "100" in result
+        text = "".join(str(item) for item in result)
+        assert "100" in text
 
 
 class TestAddMarkdown:
@@ -171,7 +188,7 @@ class TestResumeNotebook:
         nb_path = s1["notebook_path"]
         shutdown_session(session_id=s1["session_id"])
 
-        # Resume
+        # Resume — reuses the same SLURM job, new kernel
         s2 = start_session_resume_notebook(
             experiment_name="test_resume_2", notebook_path=nb_path
         )
@@ -179,7 +196,8 @@ class TestResumeNotebook:
             result = execute_code(
                 session_id=s2["session_id"], code="print(resume_var)"
             )
-            assert "hello" in result
+            text = "".join(str(item) for item in result)
+            assert "hello" in text
         finally:
             shutdown_session(session_id=s2["session_id"])
 
@@ -205,22 +223,59 @@ class TestContinueNotebook:
                     "    print('NameError: variable not defined')"
                 ),
             )
-            assert "NameError" in result
+            text = "".join(str(item) for item in result)
+            assert "NameError" in text
         finally:
             shutdown_session(session_id=s2["session_id"])
 
 
 class TestShutdownSession:
-    def test_shutdown(self):
+    def test_shutdown_only_kills_kernel(self):
+        """Shutdown session kills the kernel but keeps the SLURM job alive."""
         s = start_new_session(experiment_name="test_shutdown")
         job_id = s["job_id"]
         result = shutdown_session(session_id=s["session_id"])
         assert "shutdown" in result.lower()
         assert s["session_id"] not in sessions
-        # Wait for SLURM to process cancellation (may go through COMPLETING)
-        time.sleep(10)
+        # SLURM job should still be running (shared server)
+        time.sleep(2)
         state = get_job_state(job_id)
-        assert state == "" or "CANCEL" in state or "COMPLET" in state
+        assert state == "RUNNING"
+
+
+class TestSharedServer:
+    def test_multiple_sessions_same_job(self):
+        """Multiple sessions share the same SLURM job."""
+        s1 = start_new_session(experiment_name="test_shared_1")
+        s2 = start_new_session(experiment_name="test_shared_2")
+        try:
+            assert s1["job_id"] == s2["job_id"]
+            assert s1["hostname"] == s2["hostname"]
+            # Both sessions work independently
+            execute_code(session_id=s1["session_id"], code="shared_a = 1")
+            execute_code(session_id=s2["session_id"], code="shared_b = 2")
+            r1 = execute_code(
+                session_id=s1["session_id"], code="print(shared_a)"
+            )
+            r2 = execute_code(
+                session_id=s2["session_id"], code="print(shared_b)"
+            )
+            assert "1" in "".join(str(item) for item in r1)
+            assert "2" in "".join(str(item) for item in r2)
+            # Session 1 shouldn't see session 2's variables
+            r3 = execute_code(
+                session_id=s1["session_id"],
+                code=(
+                    "try:\n"
+                    "    print(shared_b)\n"
+                    "except NameError:\n"
+                    "    print('isolated')"
+                ),
+            )
+            assert "isolated" in "".join(str(item) for item in r3)
+        finally:
+            shutdown_session(session_id=s1["session_id"])
+            shutdown_session(session_id=s2["session_id"])
 
 
 class TestServerStatus:
@@ -231,3 +286,5 @@ class TestServerStatus:
         assert "active_sessions" in status
         assert status["active_sessions"] >= 1
         assert session["session_id"] in status["sessions"]
+        assert "server" in status
+        assert status["server"]["job_running"] is True
