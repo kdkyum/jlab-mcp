@@ -1,9 +1,11 @@
+import base64
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 
 from jlab_mcp import config
 from jlab_mcp.jupyter_client import JupyterLabClient
@@ -50,21 +52,32 @@ def _validate_notebook_path(notebook_path: str) -> Path:
     return nb_path
 
 
-def _format_outputs(outputs: list[dict]) -> str:
-    """Format kernel outputs into a readable string."""
-    parts: list[str] = []
+def _format_outputs(outputs: list[dict]) -> list | str:
+    """Format kernel outputs into content blocks.
+
+    Returns a list of text strings and Image objects when images are present,
+    or a plain string when there are no images.
+    """
+    parts: list = []
+    has_images = False
     for out in outputs:
         if out["type"] == "text":
             parts.append(out["content"])
         elif out["type"] == "image":
-            parts.append(f"[Image: base64 PNG, {len(out['content'])} chars]")
+            has_images = True
+            image_bytes = base64.b64decode(out["content"])
+            parts.append(Image(data=image_bytes, format="png"))
         elif out["type"] == "error":
             tb = "\n".join(out.get("traceback", []))
             parts.append(
                 f"Error: {out.get('ename', 'Error')}: "
                 f"{out.get('evalue', '')}\n{tb}"
             )
-    return "".join(parts) if parts else "(no output)"
+    if not parts:
+        return "(no output)"
+    if has_images:
+        return parts
+    return "".join(parts)
 
 
 def _setup_slurm_and_kernel() -> tuple[str, str, JupyterLabClient, str, str]:

@@ -84,26 +84,28 @@ class TestExecuteCode:
         assert "CUDA available: True" in result
 
     def test_image_output(self, session):
+        from fastmcp.utilities.types import Image
+
+        # First enable inline matplotlib in the kernel
+        execute_code(
+            session_id=session["session_id"],
+            code="%matplotlib inline",
+        )
         result = execute_code(
             session_id=session["session_id"],
             code=(
-                "import matplotlib\n"
-                "matplotlib.use('Agg')\n"
                 "import matplotlib.pyplot as plt\n"
                 "import numpy as np\n"
-                "import io, base64\n"
                 "x = np.linspace(0, 10, 100)\n"
                 "fig, ax = plt.subplots()\n"
                 "ax.plot(x, np.sin(x))\n"
                 "ax.set_title('Test Plot')\n"
-                "buf = io.BytesIO()\n"
-                "fig.savefig(buf, format='png')\n"
-                "buf.seek(0)\n"
-                "print(f'image_size={len(buf.getvalue())} bytes')\n"
-                "plt.close()"
+                "plt.show()"
             ),
         )
-        assert "image_size=" in result
+        # When images are present, result is a list with Image objects
+        assert isinstance(result, list)
+        assert any(isinstance(item, Image) for item in result)
 
     def test_error_handling(self, session):
         result = execute_code(session_id=session["session_id"], code="1/0")
