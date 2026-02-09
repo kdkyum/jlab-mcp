@@ -1,3 +1,4 @@
+import hashlib
 import importlib.resources
 import os
 from pathlib import Path
@@ -49,6 +50,14 @@ PORT_RANGE = (
 
 # Working directory — the .venv here is activated on the compute node
 PROJECT_DIR = Path.cwd()
+
+# Per-project status file (keyed by project directory)
+_project_hash = hashlib.sha256(str(PROJECT_DIR).encode()).hexdigest()[:12]
+STATUS_DIR = _get_path(
+    "JLAB_MCP_STATUS_DIR",
+    str(JLAB_MCP_DIR / "servers" / f"{PROJECT_DIR.name}-{_project_hash}"),
+)
+STATUS_FILE = STATUS_DIR / "server-status"
 
 
 def get_template_content() -> str:

@@ -4,7 +4,7 @@ import time
 
 from jlab_mcp import config
 
-_STATUS_FILE = config.JLAB_MCP_DIR / "server-status"
+_STATUS_FILE = config.STATUS_FILE
 
 
 def main():

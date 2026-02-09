@@ -17,7 +17,7 @@ logger = logging.getLogger("jlab-mcp")
 
 mcp = FastMCP("jlab-mcp")
 
-_STATUS_FILE = config.JLAB_MCP_DIR / "server-status"
+_STATUS_FILE = config.STATUS_FILE
 
 
 # ---------------------------------------------------------------------------
