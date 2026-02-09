@@ -91,6 +91,12 @@ def _cmd_start():
             hostname = info.get("HOSTNAME", "?")
             print(f"JupyterLab already running on {hostname} (job {job_id})")
             return
+        # Stale status file — job no longer running
+        _clear_status()
+    elif state in ("pending", "starting"):
+        job_id = info.get("JOB_ID", "")
+        if job_id and not is_job_running(job_id):
+            _clear_status()
 
     # Submit new job
     job_id, conn_file, port, token = submit_job()
@@ -108,7 +114,7 @@ def _cmd_start():
     print(f"Job running on {hostname}, JupyterLab starting...", flush=True)
 
     try:
-        conn_info = wait_for_connection_file(conn_file, timeout=120)
+        conn_info = wait_for_connection_file(conn_file, timeout=120, job_id=job_id)
     except Exception as e:
         _write_status("error", job_id=job_id, hostname=hostname, message=str(e))
         print(f"Error: {e}", file=sys.stderr)
@@ -123,6 +129,10 @@ def _cmd_start():
 
     start_t = time.time()
     while time.time() - start_t < 120:
+        if not is_job_running(job_id):
+            _write_status("error", job_id=job_id, message="Job cancelled")
+            print(f"SLURM job {job_id} is no longer running.", file=sys.stderr)
+            sys.exit(1)
         if client.health_check():
             break
         time.sleep(3)

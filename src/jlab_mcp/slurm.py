@@ -145,13 +145,17 @@ def wait_for_job_running(job_id: str, timeout: int = 120) -> str:
 
 
 def wait_for_connection_file(
-    path: str | Path, timeout: int = 60
+    path: str | Path, timeout: int = 60, job_id: str | None = None
 ) -> dict[str, str]:
     """Wait for connection file to appear and have content."""
     p = Path(path)
     required_keys = {"HOSTNAME", "PORT", "TOKEN"}
     start = time.time()
     while time.time() - start < timeout:
+        if job_id and not is_job_running(job_id):
+            raise RuntimeError(
+                f"SLURM job {job_id} is no longer running"
+            )
         if p.exists() and p.stat().st_size > 0:
             info = parse_connection_file(p)
             if required_keys <= info.keys():
