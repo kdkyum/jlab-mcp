@@ -148,17 +148,19 @@ fi
 model=$(extract display_name | sed -E 's/Claude ([0-9.]+) ([A-Z])[a-z]*/\1\2/g')
 remaining=$(extract_num remaining_percentage)
 
-# jlab-mcp: find active connection (skip stopped jobs)
+# jlab-mcp: read server status file written by MCP server
 jlab=""
-conn_dir="$HOME/.jlab-mcp/connections"
-if [ -d "$conn_dir" ]; then
-    for f in $(ls -t "$conn_dir"/jupyter-*.conn 2>/dev/null); do
-        last_status=$(grep '^STATUS=' "$f" 2>/dev/null | tail -1 | cut -d= -f2)
-        [ "$last_status" = "stopped" ] && continue
-        host=$(grep '^HOSTNAME=' "$f" 2>/dev/null | cut -d= -f2)
-        jlab="${host:-starting}"
-        break
-    done
+status_file="$HOME/.jlab-mcp/server-status"
+if [ -f "$status_file" ]; then
+    state=$(grep '^STATE=' "$status_file" 2>/dev/null | cut -d= -f2)
+    host=$(grep '^HOSTNAME=' "$status_file" 2>/dev/null | cut -d= -f2)
+    case "$state" in
+        ready)      jlab="$host" ;;
+        starting)   jlab="$host(starting)" ;;
+        pending)    jlab="pending" ;;
+        error)      jlab="error" ;;
+        terminated) jlab="terminated" ;;
+    esac
 fi
 
 s="$dir"
@@ -195,9 +197,12 @@ This displays the compute node hostname when connected:
 
 | Status | Meaning |
 |---|---|
-| `gpu:ravg1011` | Connected to compute node ravg1011 |
-| `gpu:starting` | SLURM job submitted, waiting for JupyterLab |
-| *(no gpu tag)* | No active jlab-mcp server |
+| `gpu:pending` | SLURM job submitted, waiting in queue |
+| `gpu:ravg1011(starting)` | Job running on ravg1011, JupyterLab starting up |
+| `gpu:ravg1011` | Connected and ready on ravg1011 |
+| `gpu:terminated` | SLURM job ended (walltime/preemption) |
+| `gpu:error` | Startup failed |
+| *(no gpu tag)* | MCP server not running |
 
 ## Testing
 

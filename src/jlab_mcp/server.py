@@ -27,6 +27,29 @@ logger = logging.getLogger("jlab-mcp")
 
 mcp = FastMCP("jlab-mcp")
 
+# Status file written by the MCP server on the login node so that
+# external tools (e.g. Claude Code statusline) can track progress.
+_STATUS_FILE = config.JLAB_MCP_DIR / "server-status"
+
+
+def _write_status(state: str, **kwargs: str) -> None:
+    """Write current server state to the status file."""
+    try:
+        lines = [f"STATE={state}"]
+        for k, v in kwargs.items():
+            lines.append(f"{k.upper()}={v}")
+        _STATUS_FILE.write_text("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
+def _clear_status() -> None:
+    """Remove the status file."""
+    try:
+        _STATUS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Shared JupyterLab server (one SLURM job, many kernels)
@@ -61,9 +84,11 @@ def _start_jupyter_server() -> JupyterServer:
     """Submit SLURM job and wait for JupyterLab to be ready."""
     job_id, conn_file, port, token = submit_job()
     logger.info(f"SLURM job {job_id} submitted (port={port}), waiting for compute node...")
+    _write_status("pending", job_id=job_id)
 
     hostname = wait_for_job_running(job_id, timeout=300)
     logger.info(f"SLURM job {job_id} running on {hostname}")
+    _write_status("starting", job_id=job_id, hostname=hostname)
 
     conn_info = wait_for_connection_file(conn_file, timeout=120)
     client = JupyterLabClient(
@@ -73,6 +98,7 @@ def _start_jupyter_server() -> JupyterServer:
     logger.info(f"Waiting for JupyterLab at {client.base_url}...")
     _wait_for_jupyter(client, timeout=120)
     logger.info(f"JupyterLab ready at {client.base_url}")
+    _write_status("ready", job_id=job_id, hostname=hostname)
 
     return JupyterServer(
         job_id=job_id, client=client, hostname=hostname, connection_file=conn_file
@@ -96,6 +122,7 @@ def _get_or_start_server() -> JupyterServer:
                 f"JupyterLab server (job {_server.job_id}) terminated. "
                 f"All existing sessions are lost. Starting a new server..."
             )
+            _write_status("terminated", job_id=_server.job_id)
             _cleanup_server_resources()
             # Invalidate all sessions that used the dead server
             sessions.clear()
@@ -121,6 +148,7 @@ def start_jupyter_background():
             _get_or_start_server()
         except Exception as e:
             logger.error(f"Background JupyterLab startup failed: {e}")
+            _write_status("error", message=str(e))
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -156,6 +184,7 @@ def _cleanup_all():
     sessions.clear()
     # Cancel the shared SLURM job
     _cleanup_server_resources()
+    _clear_status()
     logger.info("All sessions and SLURM job cleaned up")
 
 
