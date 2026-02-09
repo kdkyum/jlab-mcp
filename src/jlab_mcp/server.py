@@ -385,7 +385,7 @@ def start_session_continue_notebook(
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 def execute_code(session_id: str, code: str) -> list:
     """Execute code in the kernel and add cell to notebook.
 
@@ -404,7 +404,7 @@ def execute_code(session_id: str, code: str) -> list:
     return _format_outputs(outputs)
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 def edit_cell(session_id: str, cell_index: int, code: str) -> list:
     """Edit an existing cell, re-execute it, and update outputs.
 
