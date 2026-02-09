@@ -1,78 +1,16 @@
 # How jlab-mcp Works: Step-by-Step
 
-## 1. Starting the MCP Server
+## 1. Start the Compute Node (`jlab-mcp start`)
 
-When Claude Code starts, it reads your `.mcp.json`:
+In a separate terminal, run:
 
-```json
-{
-  "mcpServers": {
-    "jlab-mcp": {
-      "command": "jlab-mcp",
-      "env": { "JLAB_MCP_SLURM_MODULES": "cuda/12.6" }
-    }
-  }
-}
+```bash
+jlab-mcp start
 ```
 
-Claude Code spawns the process: `jlab-mcp` (the entry point from `pyproject.toml`).
+This runs on the **login node** and does the following:
 
-This runs `__main__.py`:
-
-```python
-logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-start_jupyter_background()   # submit SLURM job immediately
-mcp.run(transport="stdio")   # start MCP server
-```
-
-Two things happen:
-
-1. **Logging to stderr** — All status messages are written to stderr (stdout is reserved for MCP protocol). Claude Code captures and displays stderr from MCP servers.
-2. **Background SLURM submission** — A background thread immediately submits the SLURM job so the compute node is warming up while Claude Code completes its handshake.
-
-The FastMCP server starts and communicates with Claude Code over **stdin/stdout pipes**. It advertises 7 tools + 1 resource. By the time the user makes their first request, the JupyterLab server is often already running.
-
-### What the User Sees (in Claude Code MCP logs)
-
-```
-2025-01-15 10:32:01 [jlab-mcp] SLURM job 24215408 submitted (port=18432), waiting for compute node...
-2025-01-15 10:32:15 [jlab-mcp] SLURM job 24215408 running on ravg1011
-2025-01-15 10:32:15 [jlab-mcp] Waiting for JupyterLab at http://ravg1011:18432...
-2025-01-15 10:32:22 [jlab-mcp] JupyterLab ready at http://ravg1011:18432
-```
-
-If the SLURM job terminates (e.g., walltime reached):
-
-```
-2025-01-15 14:32:01 [jlab-mcp] JupyterLab server (job 24215408) terminated. All existing sessions are lost. Starting a new server...
-2025-01-15 14:32:02 [jlab-mcp] SLURM job 24215500 submitted (port=18501), waiting for compute node...
-```
-
-## 2. Shared JupyterLab Server
-
-Unlike the old design (one SLURM job per session), **all sessions share a single JupyterLab instance**. The SLURM job runs one JupyterLab server, and each session creates its own kernel on that server. This means:
-
-- No waiting in the SLURM queue for second/third sessions
-- Multiple notebooks can run in parallel on the same GPU node
-- `shutdown_session` only kills the kernel, not the SLURM job
-- The SLURM job is only cancelled when the MCP server exits
-
-### 2a. Background Startup
-
-When `__main__.py` calls `start_jupyter_background()`:
-
-```python
-# Runs in a background thread:
-def _get_or_start_server():
-    job_id, conn_file, port, token = submit_job()
-    hostname = wait_for_job_running(job_id, timeout=300)
-    conn_info = wait_for_connection_file(conn_file, timeout=120)
-    client = JupyterLabClient(hostname, port, token)
-    _wait_for_jupyter(client, timeout=120)
-    _server = JupyterServer(job_id, client, hostname, conn_file)
-```
-
-### 2b. Generate Connection Details
+### 1a. Generate Connection Details
 
 ```python
 # slurm.py → submit_job()
@@ -81,7 +19,7 @@ token = secrets.token_hex(24)             # e.g. "a3f8b2c1..."
 connection_file = "~/.jlab-mcp/connections/jupyter-18432.conn"
 ```
 
-### 2c. Render the SLURM Script
+### 1b. Render the SLURM Script
 
 The template (`jupyter_slurm.sh.template`) is filled in:
 
@@ -108,83 +46,68 @@ echo "TOKEN=a3f8b2c1..." >> ...
 jupyter lab --no-browser --ip=0.0.0.0 --port=18432 --ServerApp.token="$JUPYTER_TOKEN" ...
 ```
 
-This is written to a temp file and submitted:
+This is submitted via `sbatch`.
+
+### 1c. Wait for SLURM Job (up to 5 min)
+
+```
+SLURM job 24215408 submitted, waiting in queue...
+```
+
+Polls `squeue` every 3 seconds until the job state is `RUNNING`.
+
+### 1d. Wait for Connection File (up to 2 min)
+
+The SLURM script on the compute node writes hostname/port/token to the shared filesystem. The login node polls until the file appears.
+
+### 1e. Wait for JupyterLab (up to 2 min)
 
 ```python
-subprocess.run(["sbatch", "/tmp/script.sh"])
-# stdout: "Submitted batch job 24215408"
+requests.get("http://ravg1011:18432/api/status", headers={"Authorization": "token a3f8b2c1..."})
 ```
 
-### 2d. Wait for SLURM Job to Start (up to 5 min)
+### 1f. Write Status File
 
-```python
-# Polls every 3 seconds:
-subprocess.run(["squeue", "-j", "24215408", "-h", "-o", "%T %N"])
-```
+When ready, writes `~/.jlab-mcp/server-status`:
 
 ```
-Attempt 1: "PENDING "           <- waiting in queue
-Attempt 2: "PENDING "
-...
-Attempt 8: "RUNNING ravg1011"   <- got a node!
-```
-
-### 2e. Wait for Connection File (up to 2 min)
-
-The SLURM script on `ravg1011` writes the connection file to the shared filesystem. The MCP server on the login node polls:
-
-```python
-# Polls every 2 seconds:
-Path("~/.jlab-mcp/connections/jupyter-18432.conn").exists()  # True!
-```
-
-Reads it:
-
-```
+STATE=ready
+JOB_ID=24215408
 HOSTNAME=ravg1011
 PORT=18432
 TOKEN=a3f8b2c1...
-STATUS=starting
 ```
 
-### 2f. Wait for JupyterLab to Be Ready (up to 2 min)
+The MCP server reads this file to connect. The statusline script also reads it.
 
-```python
-# Polls every 3 seconds:
-requests.get("http://ravg1011:18432/api/status", headers={"Authorization": "token a3f8b2c1..."})
-# Eventually returns 200 OK
+Terminal output:
+
+```
+SLURM job 24215408 submitted, waiting in queue...
+Job running on ravg1011, JupyterLab starting...
+JupyterLab ready at http://ravg1011:18432
 ```
 
-This works because **login and compute nodes are on the same internal network**.
+## 2. MCP Server Connects
+
+When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 7 tools + 1 resource.
+
+The MCP server **does not manage SLURM** — it only reads the status file written by `jlab-mcp start` to find the running JupyterLab.
 
 ## 3. Claude Calls `start_new_session`
-
-When Claude decides it needs to run code (e.g., you ask "train a model"), it calls:
 
 ```
 start_new_session(experiment_name="my_experiment")
 ```
 
-This **does not submit a new SLURM job**. Instead:
-
-1. `_get_or_start_server()` returns the already-running shared server (or waits for the background thread to finish)
-2. A new **kernel** is created on the existing JupyterLab:
+1. `_get_or_start_server()` reads the status file and connects to JupyterLab
+2. A new **kernel** is created:
    ```python
    requests.post("http://ravg1011:18432/api/kernels", json={"name": "python3"})
    # Returns: {"id": "kernel-uuid-1234"}
    ```
 3. A new notebook is created on the shared filesystem
-4. The session is registered
-
-Returns to Claude:
-
-```json
-{"session_id": "031ec533", "notebook_path": "...", "job_id": "24215408", "hostname": "ravg1011"}
-```
-
-### Server Death Detection
-
-If the SLURM job terminates (walltime, preemption, node failure), `_get_or_start_server()` detects this via `is_job_running()` and automatically submits a **new** SLURM job. All previous sessions are invalidated since their kernels are gone.
+4. Returns: `{"session_id": "031ec533", "notebook_path": "...", "hostname": "ravg1011"}`
 
 ## 4. Claude Calls `execute_code`
 
@@ -235,62 +158,64 @@ The code and outputs are appended as a cell to `my_experiment.ipynb` on the shar
 
 ## 5. Shutdown and Cleanup
 
-### 5a. Explicit: Claude Calls `shutdown_session`
+### 5a. `shutdown_session` — Kills Kernel Only
 
 ```python
-requests.delete("http://ravg1011:18432/api/kernels/kernel-uuid-1234")  # kill kernel only
+requests.delete("http://ravg1011:18432/api/kernels/kernel-uuid-1234")
 ```
 
 The **kernel** is stopped, but the **SLURM job stays alive** for other sessions. The notebook is preserved.
 
-### 5b. Implicit: User Quits Claude Code
+### 5b. User Exits Claude Code
 
-When the user exits Claude Code (Ctrl+C, `/exit`, or closes the terminal):
+When Claude Code terminates, it kills the MCP server process. The MCP server shuts down active kernels but **does not cancel the SLURM job**. The JupyterLab instance keeps running for the next Claude Code session.
 
-1. Claude Code kills the `jlab-mcp` child process (sends SIGTERM)
-2. The MCP server's **signal handler** catches SIGTERM
-3. It shuts down all kernels
-4. It cancels the shared SLURM job via `scancel`
-5. The connection file is deleted, then the process exits
+### 5c. `jlab-mcp stop` — Cancels SLURM Job
 
-```python
-# Registered at startup:
-atexit.register(_cleanup_all)
-signal.signal(signal.SIGTERM, _signal_handler)
-signal.signal(signal.SIGINT, _signal_handler)
+When you're done for the day:
+
+```bash
+jlab-mcp stop
 ```
 
-This prevents orphaned SLURM jobs from wasting GPU time after Claude Code exits.
+This runs `scancel` and removes the status file.
 
-> **Note:** The only case cleanup won't happen is `kill -9` (SIGKILL), which cannot be intercepted. In that case, the SLURM job runs until its walltime expires.
+### 5d. Server Death (Walltime / Preemption)
 
-### 5c. Server Death (Walltime / Preemption)
+If the SLURM job terminates while using Claude Code (walltime, preemption), the next MCP tool call will fail with:
 
-If the SLURM job terminates while the MCP server is still running (e.g., walltime limit reached), the next call to `start_new_session` will:
+```
+JupyterLab not responding. Restart with: jlab-mcp start
+```
 
-1. Detect the job is no longer running
-2. Log a warning: "JupyterLab server terminated. Starting a new server..."
-3. Clear all existing sessions (their kernels are gone)
-4. Submit a new SLURM job and wait for it
+Run `jlab-mcp start` in your other terminal to get a new compute node.
 
 ## Summary Diagram
 
 ```
-Login Node                          Shared FS                    Compute Node (ravg1011)
-----------                          ---------                    -----------------------
+Terminal 1 (login node)              Shared FS                Compute Node (ravg1011)
+-------------------                  ---------                -----------------------
 
-Claude Code starts
+jlab-mcp start
+  |
+  | sbatch script.sh ------------------------------------------------> SLURM schedules job
+  | squeue (poll) <--------------------------------------------------- job starts
+  |                               connection file <------------------- writes hostname/port/token
+  | read file <-----------------------+                                |
+  | GET /api/status -------------------------------------------------> JupyterLab ready
+  | writes server-status
+  v
+"JupyterLab ready at http://ravg1011:18432"
+
+
+Terminal 2 (login node)
+-------------------
+
+claude (starts Claude Code)
   | stdin/stdout
   v
 MCP Server starts
-  |
-  |-- [background thread] --------------------------------------------->
-  |   sbatch script.sh ------------------------------------------------> SLURM schedules job
-  |   squeue (poll) <--------------------------------------------------- job starts
-  |                                 connection file <------------------- writes hostname/port/token
-  |   read file <-----------------------+                                |
-  |   GET /api/status -------------------------------------------------> JupyterLab ready
-  |<- server ready! <---------------------------------------------------+
+  | reads server-status
   |
   |-- Claude calls start_new_session
   |   POST /api/kernels -----------------------------------------------> kernel-1 started
@@ -301,14 +226,16 @@ MCP Server starts
   |   <- stream/display_data <-------------------------------------------+
   |   save cell ----------------------> notebook.ipynb
   |
-  |-- Claude calls start_new_session (2nd session — no SLURM wait!)
-  |   POST /api/kernels -----------------------------------------------> kernel-2 started
-  |
   |-- User exits Claude Code
-  |   SIGTERM caught
-  |   DELETE /api/kernels/kernel-1 ------------------------------------> kernel-1 stopped
-  |   DELETE /api/kernels/kernel-2 ------------------------------------> kernel-2 stopped
-  |   scancel 24215408 ------------------------------------------------> SLURM job cancelled
+  |   MCP server stops (kernels cleaned up, SLURM job stays alive)
+  v
+
+
+Terminal 1
+-------------------
+
+jlab-mcp stop
+  | scancel 24215408 -------------------------------------------------> SLURM job cancelled
   v
 Done
 ```

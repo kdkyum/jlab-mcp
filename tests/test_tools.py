@@ -4,6 +4,7 @@ Requires:
   - SLURM cluster access (sbatch, squeue, scancel)
   - GPU partition available
   - Shared filesystem
+  - Run `jlab-mcp start` before running these tests
 
 Run with:
   uv run python -m pytest tests/test_tools.py -v -s --timeout=300
@@ -14,7 +15,7 @@ import time
 import pytest
 
 from jlab_mcp.server import (
-    _cleanup_all,
+    _cleanup_kernels,
     _server,
     add_markdown as _add_markdown,
     edit_cell as _edit_cell,
@@ -51,10 +52,10 @@ def session():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def cleanup_shared_server():
-    """Cancel the shared SLURM job after all tests complete."""
+def cleanup_kernels_after():
+    """Cleanup all kernels after tests. SLURM job is left running."""
     yield
-    _cleanup_all()
+    _cleanup_kernels()
 
 
 class TestStartNewSession:
@@ -237,7 +238,7 @@ class TestShutdownSession:
         result = shutdown_session(session_id=s["session_id"])
         assert "shutdown" in result.lower()
         assert s["session_id"] not in sessions
-        # SLURM job should still be running (shared server)
+        # SLURM job should still be running (managed by user)
         time.sleep(2)
         state = get_job_state(job_id)
         assert state == "RUNNING"
@@ -287,4 +288,4 @@ class TestServerStatus:
         assert status["active_sessions"] >= 1
         assert session["session_id"] in status["sessions"]
         assert "server" in status
-        assert status["server"]["job_running"] is True
+        assert status["server"]["healthy"] is True

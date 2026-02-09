@@ -1,7 +1,5 @@
-import atexit
 import base64
 import logging
-import signal
 import threading
 import time
 import uuid
@@ -14,45 +12,16 @@ from fastmcp.utilities.types import Image
 from jlab_mcp import config
 from jlab_mcp.jupyter_client import JupyterLabClient
 from jlab_mcp.notebook import NotebookManager
-from jlab_mcp.slurm import (
-    cancel_job,
-    cleanup_connection_file,
-    is_job_running,
-    submit_job,
-    wait_for_connection_file,
-    wait_for_job_running,
-)
 
 logger = logging.getLogger("jlab-mcp")
 
 mcp = FastMCP("jlab-mcp")
 
-# Status file written by the MCP server on the login node so that
-# external tools (e.g. Claude Code statusline) can track progress.
 _STATUS_FILE = config.JLAB_MCP_DIR / "server-status"
 
 
-def _write_status(state: str, **kwargs: str) -> None:
-    """Write current server state to the status file."""
-    try:
-        lines = [f"STATE={state}"]
-        for k, v in kwargs.items():
-            lines.append(f"{k.upper()}={v}")
-        _STATUS_FILE.write_text("\n".join(lines) + "\n")
-    except Exception:
-        pass
-
-
-def _clear_status() -> None:
-    """Remove the status file."""
-    try:
-        _STATUS_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
 # ---------------------------------------------------------------------------
-# Shared JupyterLab server (one SLURM job, many kernels)
+# Shared JupyterLab server (managed externally via `jlab-mcp start`)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -61,7 +30,6 @@ class JupyterServer:
     job_id: str
     client: JupyterLabClient
     hostname: str
-    connection_file: str
 
 
 @dataclass
@@ -77,126 +45,90 @@ class Session:
 sessions: dict[str, Session] = {}
 _server: JupyterServer | None = None
 _server_lock = threading.Lock()
-_server_error: Exception | None = None
+_utility_kernel_id: str | None = None
 
 
-def _start_jupyter_server() -> JupyterServer:
-    """Submit SLURM job and wait for JupyterLab to be ready."""
-    job_id, conn_file, port, token = submit_job()
-    logger.info(f"SLURM job {job_id} submitted (port={port}), waiting for compute node...")
-    _write_status("pending", job_id=job_id)
+def _read_status_file() -> dict:
+    """Read the server-status file written by `jlab-mcp start`."""
+    if not _STATUS_FILE.exists():
+        return {}
+    info = {}
+    for line in _STATUS_FILE.read_text().strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            info[k] = v
+    return info
 
-    hostname = wait_for_job_running(job_id, timeout=300)
-    logger.info(f"SLURM job {job_id} running on {hostname}")
-    _write_status("starting", job_id=job_id, hostname=hostname)
 
-    conn_info = wait_for_connection_file(conn_file, timeout=120)
-    client = JupyterLabClient(
-        conn_info["HOSTNAME"], int(conn_info["PORT"]), conn_info["TOKEN"]
-    )
+def _connect_to_server() -> JupyterServer:
+    """Connect to JupyterLab using connection info from the status file."""
+    info = _read_status_file()
+    state = info.get("STATE")
 
-    logger.info(f"Waiting for JupyterLab at {client.base_url}...")
-    _wait_for_jupyter(client, timeout=120)
-    logger.info(f"JupyterLab ready at {client.base_url}")
-    _write_status("ready", job_id=job_id, hostname=hostname)
+    if not info or state is None:
+        raise RuntimeError(
+            "No JupyterLab server running. Start one with: jlab-mcp start"
+        )
+    if state != "ready":
+        raise RuntimeError(
+            f"JupyterLab not ready (state={state}). "
+            "Check progress with: jlab-mcp wait"
+        )
 
-    return JupyterServer(
-        job_id=job_id, client=client, hostname=hostname, connection_file=conn_file
-    )
+    hostname = info["HOSTNAME"]
+    port = int(info["PORT"])
+    token = info["TOKEN"]
+    job_id = info.get("JOB_ID", "")
+
+    client = JupyterLabClient(hostname, port, token)
+    if not client.health_check():
+        raise RuntimeError(
+            "JupyterLab not responding. Restart with: jlab-mcp start"
+        )
+
+    return JupyterServer(job_id=job_id, client=client, hostname=hostname)
 
 
 def _get_or_start_server() -> JupyterServer:
-    """Get the shared JupyterLab server, starting one if needed.
+    """Get the shared JupyterLab server, connecting on first call.
 
-    If the existing server's SLURM job has terminated, starts a new one.
-    Thread-safe: only one thread can start the server at a time.
+    Reads connection info from the status file written by `jlab-mcp start`.
+    If the server stops responding, clears cached state and reconnects.
     """
-    global _server, _server_error
+    global _server
     with _server_lock:
-        # Check if existing server is still alive
         if _server is not None:
-            if is_job_running(_server.job_id):
+            if _server.client.health_check():
                 return _server
-            # Server died (walltime, preemption, etc.)
-            logger.warning(
-                f"JupyterLab server (job {_server.job_id}) terminated. "
-                f"All existing sessions are lost. Starting a new server..."
-            )
-            _write_status("terminated", job_id=_server.job_id)
-            _cleanup_server_resources()
-            # Invalidate all sessions that used the dead server
+            logger.warning("JupyterLab server not responding, reconnecting...")
+            _server = None
             sessions.clear()
 
-        # Start a new server
-        _server_error = None
-        try:
-            _server = _start_jupyter_server()
-            return _server
-        except Exception as e:
-            _server_error = e
-            raise
-
-
-def start_jupyter_background():
-    """Start SLURM job submission in a background thread.
-
-    Called from __main__.py so the job starts immediately when Claude Code
-    launches the MCP server, reducing wait time on first tool call.
-    """
-    def _bg():
-        try:
-            _get_or_start_server()
-        except Exception as e:
-            logger.error(f"Background JupyterLab startup failed: {e}")
-            _write_status("error", message=str(e))
-
-    threading.Thread(target=_bg, daemon=True).start()
+        _server = _connect_to_server()
+        logger.info(f"Connected to JupyterLab on {_server.hostname}")
+        return _server
 
 
 # ---------------------------------------------------------------------------
-# Cleanup
+# Cleanup (kernels only — SLURM job is managed by user)
 # ---------------------------------------------------------------------------
 
-def _cleanup_server_resources():
-    """Cancel the shared SLURM job and remove connection file."""
-    global _server
-    if _server is None:
-        return
-    try:
-        cancel_job(_server.job_id)
-    except Exception:
-        pass
-    try:
-        cleanup_connection_file(_server.connection_file)
-    except Exception:
-        pass
-    _server = None
-
-
-def _cleanup_all():
-    """Shutdown all kernels and cancel the shared SLURM job."""
-    # Shutdown individual kernels
+def _cleanup_kernels():
+    """Shutdown all kernels (sessions + utility). Does NOT cancel the SLURM job."""
+    global _utility_kernel_id
     for sid, session in list(sessions.items()):
         try:
             session.jupyter_client.shutdown_kernel(session.kernel_id)
         except Exception:
             pass
     sessions.clear()
-    # Cancel the shared SLURM job
-    _cleanup_server_resources()
-    _clear_status()
-    logger.info("All sessions and SLURM job cleaned up")
-
-
-def _signal_handler(signum, frame):
-    """Handle SIGTERM/SIGINT by cleaning up then exiting."""
-    _cleanup_all()
-    raise SystemExit(0)
-
-
-atexit.register(_cleanup_all)
-signal.signal(signal.SIGTERM, _signal_handler)
-signal.signal(signal.SIGINT, _signal_handler)
+    if _utility_kernel_id is not None and _server is not None:
+        try:
+            _server.client.shutdown_kernel(_utility_kernel_id)
+        except Exception:
+            pass
+        _utility_kernel_id = None
+    logger.info("All sessions cleaned up")
 
 
 # ---------------------------------------------------------------------------
@@ -242,18 +174,6 @@ def _format_outputs(outputs: list[dict]) -> list:
     return parts
 
 
-def _wait_for_jupyter(client: JupyterLabClient, timeout: int = 120) -> None:
-    """Poll until JupyterLab health check passes."""
-    start = time.time()
-    while time.time() - start < timeout:
-        if client.health_check():
-            return
-        time.sleep(3)
-    raise TimeoutError(
-        f"JupyterLab not responding at {client.base_url} after {timeout}s"
-    )
-
-
 def _start_kernel(server: JupyterServer) -> str:
     """Start a new kernel on the shared JupyterLab server."""
     kernel_id = server.client.start_kernel()
@@ -288,6 +208,30 @@ def _get_session(session_id: str) -> Session:
     return sessions[session_id]
 
 
+def _get_utility_kernel(server: JupyterServer) -> str:
+    """Get or create the dedicated utility kernel.
+
+    This kernel is separate from session kernels and used by
+    ``execute_scratch`` so that diagnostic code doesn't pollute
+    session state or get saved to notebooks.
+    """
+    global _utility_kernel_id
+    if _utility_kernel_id is not None:
+        # Verify it's still alive
+        try:
+            kernels = server.client.list_kernels()
+            if any(k["id"] == _utility_kernel_id for k in kernels):
+                return _utility_kernel_id
+        except Exception:
+            pass
+        _utility_kernel_id = None
+
+    _utility_kernel_id = server.client.start_kernel()
+    time.sleep(2)
+    logger.info(f"Utility kernel {_utility_kernel_id} started on {server.hostname}")
+    return _utility_kernel_id
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
@@ -296,7 +240,7 @@ def _get_session(session_id: str) -> Session:
 def start_new_session(experiment_name: str) -> dict:
     """Start a new session: start kernel, create notebook.
 
-    Uses the shared JupyterLab server (auto-started on first call).
+    Uses the shared JupyterLab server (must be started with `jlab-mcp start`).
 
     Args:
         experiment_name: Name for the experiment/notebook.
@@ -467,6 +411,26 @@ def shutdown_session(session_id: str) -> str:
     )
 
 
+@mcp.tool(output_schema=None)
+def execute_scratch(code: str) -> list:
+    """Execute code on a utility kernel for diagnostics (GPU status, etc.).
+
+    Runs on a dedicated utility kernel that is separate from all session
+    kernels.  The code is NOT saved to any notebook and does not affect
+    session state.
+
+    Args:
+        code: Python code to execute.
+
+    Returns:
+        List of text strings and Image objects.
+    """
+    server = _get_or_start_server()
+    kernel_id = _get_utility_kernel(server)
+    outputs = server.client.execute_code(kernel_id, code)
+    return _format_outputs(outputs)
+
+
 # ---------------------------------------------------------------------------
 # MCP Resource
 # ---------------------------------------------------------------------------
@@ -476,16 +440,16 @@ def server_status() -> dict:
     """Get server status: shared SLURM job, active sessions."""
     server_info = {}
     if _server is not None:
-        job_running = False
+        healthy = False
         try:
-            job_running = is_job_running(_server.job_id)
+            healthy = _server.client.health_check()
         except Exception:
             pass
         server_info = {
             "job_id": _server.job_id,
             "hostname": _server.hostname,
             "url": _server.client.base_url,
-            "job_running": job_running,
+            "healthy": healthy,
         }
 
     session_info = {}
@@ -496,7 +460,7 @@ def server_status() -> dict:
         }
 
     return {
-        "server": server_info if server_info else "not started",
+        "server": server_info if server_info else "not connected",
         "active_sessions": len(sessions),
         "sessions": session_info,
     }

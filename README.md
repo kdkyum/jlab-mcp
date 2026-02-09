@@ -16,22 +16,7 @@ JupyterLab (compute node, via sbatch)   ← one SLURM job, many kernels
 IPython Kernels (GPU access)
 ```
 
-Login and compute nodes share a filesystem. The MCP server submits a **single SLURM job** that starts JupyterLab on a compute node. All sessions create separate kernels on this shared server. Connection info (hostname, port, token) is exchanged via a file on the shared filesystem.
-
-### Eager Startup
-
-The SLURM job is submitted **immediately** when Claude Code starts the MCP server (in a background thread). By the time you make your first request, the compute node is often already running. Progress is logged to stderr:
-
-```
-[jlab-mcp] SLURM job 24215408 submitted (port=18432), waiting for compute node...
-[jlab-mcp] SLURM job 24215408 running on ravg1011
-[jlab-mcp] Waiting for JupyterLab at http://ravg1011:18432...
-[jlab-mcp] JupyterLab ready at http://ravg1011:18432
-```
-
-### Server Death Detection
-
-If the SLURM job terminates (walltime, preemption, node failure), the next session start automatically detects this and submits a new SLURM job.
+Login and compute nodes share a filesystem. The SLURM job is managed separately from the MCP server — you start it with `jlab-mcp start` and it keeps running across Claude Code sessions. All sessions create separate kernels on this shared server.
 
 ## Setup
 
@@ -48,6 +33,46 @@ uv venv
 uv pip install jupyterlab ipykernel matplotlib numpy
 uv pip install torch --index-url https://download.pytorch.org/whl/cu126  # GPU support
 ```
+
+## Usage
+
+### 1. Start the compute node
+
+In a separate terminal, start the SLURM job:
+
+```bash
+jlab-mcp start
+```
+
+This submits the job and waits until JupyterLab is ready:
+
+```
+SLURM job 24215408 submitted, waiting in queue...
+Job running on ravg1011, JupyterLab starting...
+JupyterLab ready at http://ravg1011:18432
+```
+
+### 2. Use Claude Code
+
+In another terminal, start Claude Code. The MCP server connects to the running JupyterLab automatically.
+
+### 3. Stop when done
+
+```bash
+jlab-mcp stop
+```
+
+### CLI Commands
+
+| Command | Description |
+|---|---|
+| `jlab-mcp start` | Submit SLURM job and wait until JupyterLab is ready |
+| `jlab-mcp stop` | Cancel the SLURM job |
+| `jlab-mcp wait` | Poll status (check from another terminal) |
+| `jlab-mcp status` | Print server state, active kernels, and GPU memory |
+| `jlab-mcp` | Run MCP server (used by Claude Code, not run manually) |
+
+The SLURM job **survives Claude Code restarts**. You only need to run `jlab-mcp start` once per work session.
 
 ## Configuration
 
@@ -110,16 +135,16 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 | `execute_code` | Run Python code, append cell to notebook (returns text + images) |
 | `edit_cell` | Edit and re-execute a cell (supports negative indexing) |
 | `add_markdown` | Add markdown cell to notebook |
+| `execute_scratch` | Run code on a utility kernel (no notebook save, no session state) |
 | `shutdown_session` | Stop kernel (SLURM job stays alive for other sessions) |
 
 Resource: `jlab-mcp://server/status` — returns shared server info and active sessions.
 
 ### Session Lifecycle
 
-- **First `start_new_session`**: Waits for the background SLURM job (usually already running)
-- **Subsequent sessions**: Instant — just creates a new kernel on the same server
+- **`start_new_session`**: Creates a new kernel on the shared JupyterLab
 - **`shutdown_session`**: Kills the kernel only. The SLURM job keeps running.
-- **User exits Claude Code**: Signal handler cancels the SLURM job and cleans up all sessions
+- **SLURM job dies**: Next tool call returns an error. Run `jlab-mcp start` to restart.
 
 ## Status Line (Optional)
 
@@ -210,7 +235,7 @@ This displays the compute node hostname when connected:
 # Unit tests (no SLURM needed)
 uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_image_utils.py -v
 
-# Integration tests (requires SLURM cluster)
+# Integration tests (requires running `jlab-mcp start` first)
 uv run python -m pytest tests/test_tools.py -v -s --timeout=600
 ```
 
