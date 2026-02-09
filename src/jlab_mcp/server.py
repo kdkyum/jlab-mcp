@@ -45,7 +45,6 @@ class Session:
 sessions: dict[str, Session] = {}
 _server: JupyterServer | None = None
 _server_lock = threading.Lock()
-_utility_kernel_id: str | None = None
 
 
 def _read_status_file() -> dict:
@@ -114,20 +113,13 @@ def _get_or_start_server() -> JupyterServer:
 # ---------------------------------------------------------------------------
 
 def _cleanup_kernels():
-    """Shutdown all kernels (sessions + utility). Does NOT cancel the SLURM job."""
-    global _utility_kernel_id
+    """Shutdown all kernels. Does NOT cancel the SLURM job."""
     for sid, session in list(sessions.items()):
         try:
             session.jupyter_client.shutdown_kernel(session.kernel_id)
         except Exception:
             pass
     sessions.clear()
-    if _utility_kernel_id is not None and _server is not None:
-        try:
-            _server.client.shutdown_kernel(_utility_kernel_id)
-        except Exception:
-            pass
-        _utility_kernel_id = None
     logger.info("All sessions cleaned up")
 
 
@@ -206,30 +198,6 @@ def _get_session(session_id: str) -> Session:
     if session_id not in sessions:
         raise ValueError(f"Unknown session: {session_id}")
     return sessions[session_id]
-
-
-def _get_utility_kernel(server: JupyterServer) -> str:
-    """Get or create the dedicated utility kernel.
-
-    This kernel is separate from session kernels and used by
-    ``execute_scratch`` so that diagnostic code doesn't pollute
-    session state or get saved to notebooks.
-    """
-    global _utility_kernel_id
-    if _utility_kernel_id is not None:
-        # Verify it's still alive
-        try:
-            kernels = server.client.list_kernels()
-            if any(k["id"] == _utility_kernel_id for k in kernels):
-                return _utility_kernel_id
-        except Exception:
-            pass
-        _utility_kernel_id = None
-
-    _utility_kernel_id = server.client.start_kernel()
-    time.sleep(2)
-    logger.info(f"Utility kernel {_utility_kernel_id} started on {server.hostname}")
-    return _utility_kernel_id
 
 
 # ---------------------------------------------------------------------------
@@ -413,11 +381,10 @@ def shutdown_session(session_id: str) -> str:
 
 @mcp.tool(output_schema=None)
 def execute_scratch(code: str) -> list:
-    """Execute code on a utility kernel for diagnostics (GPU status, etc.).
+    """Execute code on a temporary kernel for diagnostics (GPU status, etc.).
 
-    Runs on a dedicated utility kernel that is separate from all session
-    kernels.  The code is NOT saved to any notebook and does not affect
-    session state.
+    Starts a throwaway kernel, runs the code, and shuts it down immediately.
+    The code is NOT saved to any notebook and does not affect session state.
 
     Args:
         code: Python code to execute.
@@ -426,9 +393,16 @@ def execute_scratch(code: str) -> list:
         List of text strings and Image objects.
     """
     server = _get_or_start_server()
-    kernel_id = _get_utility_kernel(server)
-    outputs = server.client.execute_code(kernel_id, code)
-    return _format_outputs(outputs)
+    kernel_id = server.client.start_kernel()
+    time.sleep(2)
+    try:
+        outputs = server.client.execute_code(kernel_id, code)
+        return _format_outputs(outputs)
+    finally:
+        try:
+            server.client.shutdown_kernel(kernel_id)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
