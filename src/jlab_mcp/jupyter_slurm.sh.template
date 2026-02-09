@@ -14,7 +14,8 @@
 {module_commands}
 
 # Activate shared project venv (on shared filesystem)
-source {project_dir}/.venv/bin/activate
+export VIRTUAL_ENV="{project_dir}/.venv"
+export PATH="{project_dir}/.venv/bin:$PATH"
 
 JUPYTER_PORT={port}
 export JUPYTER_TOKEN="{token}"
