@@ -358,6 +358,11 @@ def add_markdown(session_id: str, markdown: str) -> str:
 def shutdown_session(session_id: str) -> str:
     """Shutdown session: stop kernel. The SLURM job stays alive for other sessions.
 
+    IMPORTANT: Do NOT call this automatically after finishing work.
+    The user may want to continue experiments on the same notebook later.
+    Only call this when the user explicitly asks to shutdown, or when
+    starting a new session for a different notebook.
+
     Args:
         session_id: Session identifier.
 
