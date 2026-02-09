@@ -121,6 +121,84 @@ Resource: `jlab-mcp://server/status` — returns shared server info and active s
 - **`shutdown_session`**: Kills the kernel only. The SLURM job keeps running.
 - **User exits Claude Code**: Signal handler cancels the SLURM job and cleans up all sessions
 
+## Status Line (Optional)
+
+Show the compute node connection status in Claude Code's status bar. Save this script as `~/.claude/statusline.sh`:
+
+```bash
+#!/bin/bash
+input=$(cat)
+
+extract() {
+    echo "$input" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:.*"\([^"]*\)"/\1/'
+}
+extract_num() {
+    echo "$input" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*[0-9.]*" | head -1 | sed 's/.*:[[:space:]]*//';
+}
+
+cwd=$(extract current_dir)
+[ -z "$cwd" ] && cwd=$(extract cwd)
+dir=$(basename "${cwd:-~}")
+
+branch=""
+if [ -n "$cwd" ] && [ -d "$cwd/.git" ]; then
+    branch=$(git --no-optional-locks -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)
+fi
+
+model=$(extract display_name | sed -E 's/Claude ([0-9.]+) ([A-Z])[a-z]*/\1\2/g')
+remaining=$(extract_num remaining_percentage)
+
+# jlab-mcp: find active connection (skip stopped jobs)
+jlab=""
+conn_dir="$HOME/.jlab-mcp/connections"
+if [ -d "$conn_dir" ]; then
+    for f in $(ls -t "$conn_dir"/jupyter-*.conn 2>/dev/null); do
+        last_status=$(grep '^STATUS=' "$f" 2>/dev/null | tail -1 | cut -d= -f2)
+        [ "$last_status" = "stopped" ] && continue
+        host=$(grep '^HOSTNAME=' "$f" 2>/dev/null | cut -d= -f2)
+        jlab="${host:-starting}"
+        break
+    done
+fi
+
+s="$dir"
+[ -n "$branch" ] && s="$dir:$branch"
+[ -n "$model" ] && s="$s | $model"
+[ -n "$remaining" ] && s="$s | ctx:$(printf '%.0f' "$remaining")%"
+[ -n "$jlab" ] && s="$s | gpu:$jlab"
+
+printf '[%s]' "$s"
+```
+
+Then enable it:
+
+```bash
+chmod +x ~/.claude/statusline.sh
+```
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  }
+}
+```
+
+This displays the compute node hostname when connected:
+
+```
+[my-project:main | 4.6O | ctx:72% | gpu:ravg1011]
+```
+
+| Status | Meaning |
+|---|---|
+| `gpu:ravg1011` | Connected to compute node ravg1011 |
+| `gpu:starting` | SLURM job submitted, waiting for JupyterLab |
+| *(no gpu tag)* | No active jlab-mcp server |
+
 ## Testing
 
 ```bash
