@@ -1,6 +1,6 @@
 [project]
 name = "jlab-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Jupyter Lab MCP server for SLURM clusters"
 readme = "README.md"
 requires-python = ">=3.10"
