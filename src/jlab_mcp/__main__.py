@@ -17,7 +17,8 @@ def main():
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
         if cmd == "start":
-            _cmd_start()
+            time_limit = sys.argv[2] if len(sys.argv) > 2 else None
+            _cmd_start(time_limit=time_limit)
         elif cmd == "stop":
             _cmd_stop()
         elif cmd == "wait":
@@ -73,7 +74,7 @@ def _read_status():
 # CLI commands
 # ---------------------------------------------------------------------------
 
-def _cmd_start():
+def _cmd_start(time_limit: str | None = None):
     """Submit SLURM job and wait until JupyterLab is ready."""
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.slurm import (
@@ -82,6 +83,9 @@ def _cmd_start():
         wait_for_connection_file,
         wait_for_job_running,
     )
+
+    if time_limit:
+        config.SLURM_TIME = time_limit
 
     # Check if already running
     state, info = _read_status()

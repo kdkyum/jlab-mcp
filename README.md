@@ -41,7 +41,9 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu126  # GPU s
 In a separate terminal, start the SLURM job:
 
 ```bash
-jlab-mcp start
+jlab-mcp start              # uses default time limit (4h)
+jlab-mcp start 24:00:00     # 24 hour time limit
+jlab-mcp start 1-00:00:00   # 1 day
 ```
 
 This submits the job and waits until JupyterLab is ready:
@@ -66,7 +68,7 @@ jlab-mcp stop
 
 | Command | Description |
 |---|---|
-| `jlab-mcp start` | Submit SLURM job and wait until JupyterLab is ready |
+| `jlab-mcp start [TIME]` | Submit SLURM job and wait until ready. Optional TIME overrides `JLAB_MCP_SLURM_TIME` (e.g. `24:00:00`) |
 | `jlab-mcp stop` | Cancel the SLURM job |
 | `jlab-mcp wait` | Poll status (check from another terminal) |
 | `jlab-mcp status` | Print server state, active kernels, and GPU memory |
