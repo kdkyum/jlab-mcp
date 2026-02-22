@@ -15,7 +15,7 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu126
 uv run python -m jlab_mcp
 
 # Run all unit tests (no SLURM required)
-uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_image_utils.py -v
+uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_image_utils.py tests/test_local.py -v
 
 # Run a single test
 uv run python -m pytest tests/test_notebook.py::TestEditCell::test_edit_negative_index -v
@@ -26,14 +26,14 @@ uv run python -m pytest tests/test_tools.py -v -s --timeout=300
 
 ## Architecture
 
-MCP server (FastMCP, stdio transport) running on a login node that manages JupyterLab sessions on SLURM compute nodes with GPU access.
+MCP server (FastMCP, stdio transport) that manages JupyterLab sessions. Supports two modes: **SLURM** (HPC clusters) and **local** (laptops/workstations). Mode is auto-detected (`sbatch` on PATH → SLURM, else local) or set via `JLAB_MCP_RUN_MODE`.
 
 ```
-Claude Code (login node) ↔ stdio ↔ MCP Server (login node) ↔ HTTP/WS ↔ JupyterLab (compute node via sbatch)
+Claude Code ↔ stdio ↔ MCP Server ↔ HTTP/WS ↔ JupyterLab (SLURM compute node or local subprocess)
 ```
 
-Login and compute nodes share a filesystem. The same `.venv` is used on both sides. Communication happens via:
-1. **Connection files** on shared FS — SLURM job writes hostname/port/token, MCP server reads it
+Communication happens via:
+1. **Status file** — `jlab-mcp start` writes hostname/port/token, MCP server reads it
 2. **JupyterLab REST API** — kernel lifecycle (start, stop, list)
 3. **Kernel WebSocket** — code execution via Jupyter message protocol v5.3
 
@@ -41,6 +41,7 @@ Login and compute nodes share a filesystem. The same `.venv` is used on both sid
 
 - **server.py** — FastMCP server with 7 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (job_id, kernel_id, JupyterLabClient, notebook_path, NotebookManager).
 - **slurm.py** — Renders SLURM template, runs `sbatch`/`squeue`/`scancel`, polls for job state and connection file. All SLURM output parsing is string-based (no `jq`).
+- **local.py** — Local mode: spawns `jupyter lab` as a subprocess, manages PID-based lifecycle.
 - **jupyter_client.py** — `JupyterLabClient` class: REST API calls (`requests`) for kernel management, WebSocket (`websocket-client`) for code execution. Collects outputs (text/image/error) until kernel goes idle.
 - **notebook.py** — `NotebookManager` class: creates/edits/saves `.ipynb` files with `nbformat`. Handles output conversion, cell ID generation, and notebook restoration (re-executing all cells).
 - **config.py** — All defaults overridable via `JLAB_MCP_*` environment variables. Directories auto-created on import.

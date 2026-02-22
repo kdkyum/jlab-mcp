@@ -1,4 +1,5 @@
 import logging
+import signal
 import sys
 import time
 
@@ -75,6 +76,14 @@ def _read_status():
 # ---------------------------------------------------------------------------
 
 def _cmd_start(time_limit: str | None = None):
+    """Start JupyterLab — dispatches to SLURM or local mode."""
+    if config.RUN_MODE == "local":
+        _cmd_start_local()
+    else:
+        _cmd_start_slurm(time_limit=time_limit)
+
+
+def _cmd_start_slurm(time_limit: str | None = None):
     """Submit SLURM job and wait until JupyterLab is ready."""
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.slurm import (
@@ -152,22 +161,107 @@ def _cmd_start(time_limit: str | None = None):
     print(f"JupyterLab ready at {client.base_url}", flush=True)
 
 
-def _cmd_stop():
-    """Cancel the SLURM job."""
-    from jlab_mcp.slurm import cancel_job
+def _cmd_start_local():
+    """Start JupyterLab as a local subprocess (foreground)."""
+    from jlab_mcp.jupyter_client import JupyterLabClient
+    from jlab_mcp.local import is_local_running, start_jupyter_local, stop_jupyter_local
 
+    # Check if already running
     state, info = _read_status()
-    job_id = info.get("JOB_ID")
-    if not job_id:
-        print("No running job found.")
-        return
+    if state == "ready" and info.get("MODE") == "local":
+        pid = int(info.get("PID", "0"))
+        if pid and is_local_running(pid):
+            hostname = info.get("HOSTNAME", "?")
+            port = info.get("PORT", "?")
+            print(f"JupyterLab already running at {hostname}:{port} (PID {pid})")
+            return
+        _clear_status()
+
+    proc, hostname, port, token = start_jupyter_local()
+    _write_status(
+        "starting", mode="local", pid=str(proc.pid),
+        hostname=hostname, port=str(port), token=token,
+    )
+    print(f"JupyterLab starting (PID {proc.pid})...", flush=True)
+
+    # Wait for health check
+    client = JupyterLabClient(hostname, port, token)
+    start_t = time.time()
+    while time.time() - start_t < 60:
+        if proc.poll() is not None:
+            _write_status("error", mode="local", message="Process exited early")
+            print(
+                f"JupyterLab process exited with code {proc.returncode}",
+                file=sys.stderr,
+            )
+            _clear_status()
+            sys.exit(1)
+        if client.health_check():
+            break
+        time.sleep(1)
+    else:
+        stop_jupyter_local(proc.pid)
+        _write_status("error", mode="local", message="JupyterLab timeout")
+        print(
+            f"Timeout: JupyterLab not responding at {client.base_url}",
+            file=sys.stderr,
+        )
+        _clear_status()
+        sys.exit(1)
+
+    _write_status(
+        "ready", mode="local", pid=str(proc.pid),
+        hostname=hostname, port=str(port), token=token,
+    )
+    print(f"JupyterLab ready at {client.base_url} (PID {proc.pid})", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
+
+    # Block in foreground, clean up on signal
+    def _shutdown(signum, frame):
+        print("\nShutting down JupyterLab...", flush=True)
+        stop_jupyter_local(proc.pid)
+        _clear_status()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        cancel_job(job_id)
-    except Exception as e:
-        print(f"Error cancelling job {job_id}: {e}", file=sys.stderr)
-    _clear_status()
-    print(f"SLURM job {job_id} cancelled.")
+        proc.wait()
+    except KeyboardInterrupt:
+        _shutdown(None, None)
+    finally:
+        _clear_status()
+
+
+def _cmd_stop():
+    """Stop JupyterLab (SLURM or local)."""
+    state, info = _read_status()
+    mode = info.get("MODE", "slurm")
+
+    if mode == "local":
+        from jlab_mcp.local import stop_jupyter_local
+
+        pid = int(info.get("PID", "0"))
+        if not pid:
+            print("No running local server found.")
+            return
+        stop_jupyter_local(pid)
+        _clear_status()
+        print(f"Local JupyterLab (PID {pid}) stopped.")
+    else:
+        from jlab_mcp.slurm import cancel_job
+
+        job_id = info.get("JOB_ID")
+        if not job_id:
+            print("No running job found.")
+            return
+        try:
+            cancel_job(job_id)
+        except Exception as e:
+            print(f"Error cancelling job {job_id}: {e}", file=sys.stderr)
+        _clear_status()
+        print(f"SLURM job {job_id} cancelled.")
 
 
 def _cmd_wait():
@@ -176,7 +270,7 @@ def _cmd_wait():
     start = time.time()
     last_state = None
 
-    print("Waiting for jlab-mcp compute node...", flush=True)
+    print("Waiting for jlab-mcp server...", flush=True)
 
     while time.time() - start < timeout:
         state, info = _read_status()
@@ -187,10 +281,10 @@ def _cmd_wait():
                 print("  No status file yet (run `jlab-mcp start`)", flush=True)
             elif state == "pending":
                 job_id = info.get("JOB_ID", "?")
-                print(f"  SLURM job {job_id} submitted, waiting in queue...", flush=True)
+                print(f"  Job {job_id} submitted, waiting in queue...", flush=True)
             elif state == "starting":
                 hostname = info.get("HOSTNAME", "?")
-                print(f"  Job running on {hostname}, JupyterLab starting...", flush=True)
+                print(f"  Running on {hostname}, JupyterLab starting...", flush=True)
             elif state == "ready":
                 hostname = info.get("HOSTNAME", "?")
                 print(f"  Connected to {hostname} - ready!", flush=True)
@@ -205,7 +299,7 @@ def _cmd_wait():
 
         time.sleep(2)
 
-    print("Timeout waiting for compute node.", file=sys.stderr, flush=True)
+    print("Timeout waiting for server.", file=sys.stderr, flush=True)
     sys.exit(1)
 
 
@@ -217,9 +311,13 @@ def _cmd_status():
         print("No jlab-mcp server running.")
         return
 
+    mode = info.get("MODE", "slurm")
     print(f"State:    {state}")
+    print(f"Mode:     {mode}")
     if "JOB_ID" in info:
         print(f"Job ID:   {info['JOB_ID']}")
+    if "PID" in info:
+        print(f"PID:      {info['PID']}")
     if "HOSTNAME" in info:
         print(f"Hostname: {info['HOSTNAME']}")
     if "PORT" in info:
@@ -228,14 +326,25 @@ def _cmd_status():
     if state != "ready":
         return
 
-    from jlab_mcp.slurm import is_job_running
+    # Check if the underlying process/job is alive
+    if mode == "local":
+        from jlab_mcp.local import is_local_running
 
-    job_id = info.get("JOB_ID", "")
-    if job_id:
-        running = is_job_running(job_id)
-        print(f"Running:  {running}")
-        if not running:
-            return
+        pid = int(info.get("PID", "0"))
+        if pid:
+            running = is_local_running(pid)
+            print(f"Running:  {running}")
+            if not running:
+                return
+    else:
+        from jlab_mcp.slurm import is_job_running
+
+        job_id = info.get("JOB_ID", "")
+        if job_id:
+            running = is_job_running(job_id)
+            print(f"Running:  {running}")
+            if not running:
+                return
 
     hostname = info.get("HOSTNAME", "")
     port = info.get("PORT", "")

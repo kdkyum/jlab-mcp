@@ -1,6 +1,7 @@
 import hashlib
 import importlib.resources
 import os
+import shutil
 from pathlib import Path
 
 
@@ -58,6 +59,24 @@ STATUS_DIR = _get_path(
     str(JLAB_MCP_DIR / "servers" / f"{PROJECT_DIR.name}-{_project_hash}"),
 )
 STATUS_FILE = STATUS_DIR / "server-status"
+
+
+def _detect_run_mode() -> str:
+    """Detect whether to use SLURM or local mode.
+
+    Checks JLAB_MCP_RUN_MODE env var first, then falls back to
+    auto-detection based on whether sbatch is available on PATH.
+    """
+    env_mode = os.environ.get("JLAB_MCP_RUN_MODE", "").lower()
+    if env_mode in ("local", "slurm"):
+        return env_mode
+    return "slurm" if shutil.which("sbatch") else "local"
+
+
+RUN_MODE = _detect_run_mode()
+
+# Local mode bind address
+LOCAL_BIND_IP = _get_str("JLAB_MCP_LOCAL_BIND_IP", "127.0.0.1")
 
 
 def get_template_content() -> str:

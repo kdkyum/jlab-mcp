@@ -7,16 +7,29 @@ Inspired by and adapted from [goodfire-ai/scribe](https://github.com/goodfire-ai
 ## Architecture
 
 ```
-Claude Code (login node)
+Claude Code
     ↕ stdio
-MCP Server (login node)
+MCP Server
     ↕ HTTP/WebSocket
-JupyterLab (compute node, via sbatch)   ← one SLURM job, many kernels
+JupyterLab (SLURM compute node or local subprocess)   ← one server, many kernels
     ↕
 IPython Kernels (GPU access)
 ```
 
-Login and compute nodes share a filesystem. The SLURM job is managed separately from the MCP server — you start it with `jlab-mcp start` and it keeps running across Claude Code sessions. All sessions create separate kernels on this shared server.
+JupyterLab runs either on a SLURM compute node (HPC clusters) or as a local subprocess (laptops/workstations). The server is managed separately from the MCP server — you start it with `jlab-mcp start` and it keeps running across Claude Code sessions. All sessions create separate kernels on this shared server.
+
+## Local Mode
+
+On machines without SLURM (laptops, workstations), jlab-mcp automatically runs JupyterLab as a local subprocess. Mode is auto-detected: if `sbatch` is on PATH, SLURM mode is used; otherwise, local mode.
+
+Override with an environment variable:
+
+```bash
+export JLAB_MCP_RUN_MODE=local   # force local mode
+export JLAB_MCP_RUN_MODE=slurm   # force SLURM mode
+```
+
+In local mode, `jlab-mcp start` runs in the **foreground** — press Ctrl+C to stop. The status file uses the same format as SLURM mode, so the MCP server works identically in both modes.
 
 ## Setup
 
@@ -94,6 +107,8 @@ All settings are configurable via environment variables. No values are hardcoded
 | `JLAB_MCP_SLURM_MODULES` | *(empty)* | Space-separated modules to load (e.g. `cuda/12.6`) |
 | `JLAB_MCP_PORT_MIN` | `18000` | Port range lower bound |
 | `JLAB_MCP_PORT_MAX` | `19000` | Port range upper bound |
+| `JLAB_MCP_RUN_MODE` | *(auto)* | `local` or `slurm` (auto-detects based on `sbatch` availability) |
+| `JLAB_MCP_LOCAL_BIND_IP` | `127.0.0.1` | Bind address for local mode |
 
 ### Example: Cluster with A100 GPUs and CUDA module
 

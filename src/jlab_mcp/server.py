@@ -26,7 +26,7 @@ _STATUS_FILE = config.STATUS_FILE
 
 @dataclass
 class JupyterServer:
-    """A JupyterLab instance running on a SLURM compute node."""
+    """A JupyterLab instance running on a SLURM compute node or local subprocess."""
     job_id: str
     client: JupyterLabClient
     hostname: str

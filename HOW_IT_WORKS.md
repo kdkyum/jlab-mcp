@@ -1,6 +1,8 @@
 # How jlab-mcp Works: Step-by-Step
 
-## 1. Start the Compute Node (`jlab-mcp start`)
+jlab-mcp supports two modes: **SLURM** (HPC clusters) and **local** (laptops/workstations). Mode is auto-detected — if `sbatch` is on PATH, SLURM mode is used; otherwise, local mode. Override with `JLAB_MCP_RUN_MODE=local|slurm`.
+
+## 1. Start JupyterLab (`jlab-mcp start`)
 
 In a separate terminal, run:
 
@@ -8,9 +10,11 @@ In a separate terminal, run:
 jlab-mcp start
 ```
 
-This runs on the **login node** and does the following:
+### SLURM Mode
 
-### 1a. Generate Connection Details
+On an HPC cluster, this runs on the **login node** and does the following:
+
+#### 1a. Generate Connection Details
 
 ```python
 # slurm.py → submit_job()
@@ -19,7 +23,7 @@ token = secrets.token_hex(24)             # e.g. "a3f8b2c1..."
 connection_file = "~/.jlab-mcp/connections/jupyter-18432.conn"
 ```
 
-### 1b. Render the SLURM Script
+#### 1b. Render the SLURM Script
 
 The template (`jupyter_slurm.sh.template`) is filled in:
 
@@ -48,7 +52,7 @@ jupyter lab --no-browser --ip=0.0.0.0 --port=18432 --ServerApp.token="$JUPYTER_T
 
 This is submitted via `sbatch`.
 
-### 1c. Wait for SLURM Job (up to 5 min)
+#### 1c. Wait for SLURM Job (up to 5 min)
 
 ```
 SLURM job 24215408 submitted, waiting in queue...
@@ -56,19 +60,19 @@ SLURM job 24215408 submitted, waiting in queue...
 
 Polls `squeue` every 3 seconds until the job state is `RUNNING`.
 
-### 1d. Wait for Connection File (up to 2 min)
+#### 1d. Wait for Connection File (up to 2 min)
 
 The SLURM script on the compute node writes hostname/port/token to the shared filesystem. The login node polls until the file appears.
 
-### 1e. Wait for JupyterLab (up to 2 min)
+#### 1e. Wait for JupyterLab (up to 2 min)
 
 ```python
 requests.get("http://ravg1011:18432/api/status", headers={"Authorization": "token a3f8b2c1..."})
 ```
 
-### 1f. Write Status File
+#### 1f. Write Status File
 
-When ready, writes `~/.jlab-mcp/server-status`:
+When ready, writes the per-project status file:
 
 ```
 STATE=ready
@@ -78,8 +82,6 @@ PORT=18432
 TOKEN=a3f8b2c1...
 ```
 
-The MCP server reads this file to connect. The statusline script also reads it.
-
 Terminal output:
 
 ```
@@ -87,6 +89,58 @@ SLURM job 24215408 submitted, waiting in queue...
 Job running on ravg1011, JupyterLab starting...
 JupyterLab ready at http://ravg1011:18432
 ```
+
+### Local Mode
+
+On machines without SLURM, `jlab-mcp start` spawns JupyterLab as a local subprocess:
+
+#### 1a. Generate Port and Token
+
+```python
+# local.py → start_jupyter_local()
+port = random.randint(18000, 19000)
+token = secrets.token_hex(24)
+```
+
+#### 1b. Spawn JupyterLab Subprocess
+
+```python
+subprocess.Popen([sys.executable, "-m", "jupyter", "lab",
+    "--ip=127.0.0.1", "--port=18432",
+    "--IdentityProvider.token=a3f8b2c1...",
+    "--no-browser", "--notebook-dir=./notebooks"])
+```
+
+Logs are written to `~/.jlab-mcp/logs/jupyter-local-18432.log`.
+
+#### 1c. Wait for Health Check (up to 1 min)
+
+Polls `GET /api/status` every second. Also checks `proc.poll()` to detect early crashes.
+
+#### 1d. Write Status File
+
+Same format as SLURM mode, with `MODE=local` and `PID=` instead of `JOB_ID=`:
+
+```
+STATE=ready
+MODE=local
+PID=12345
+HOSTNAME=127.0.0.1
+PORT=18432
+TOKEN=a3f8b2c1...
+```
+
+The process stays in the **foreground** — press Ctrl+C to stop.
+
+Terminal output:
+
+```
+JupyterLab starting (PID 12345)...
+JupyterLab ready at http://127.0.0.1:18432 (PID 12345)
+Press Ctrl+C to stop.
+```
+
+The MCP server reads this same status file to connect, regardless of mode.
 
 ## 2. MCP Server Connects
 
@@ -170,7 +224,7 @@ The **kernel** is stopped, but the **SLURM job stays alive** for other sessions.
 
 When Claude Code terminates, it kills the MCP server process. The MCP server shuts down active kernels but **does not cancel the SLURM job**. The JupyterLab instance keeps running for the next Claude Code session.
 
-### 5c. `jlab-mcp stop` — Cancels SLURM Job
+### 5c. `jlab-mcp stop` — Stops JupyterLab
 
 When you're done for the day:
 
@@ -178,19 +232,22 @@ When you're done for the day:
 jlab-mcp stop
 ```
 
-This runs `scancel` and removes the status file.
+- **SLURM mode**: runs `scancel` and removes the status file
+- **Local mode**: sends `SIGTERM` to the subprocess and removes the status file (or just press Ctrl+C in the `jlab-mcp start` terminal)
 
-### 5d. Server Death (Walltime / Preemption)
+### 5d. Server Death (Walltime / Preemption / Crash)
 
-If the SLURM job terminates while using Claude Code (walltime, preemption), the next MCP tool call will fail with:
+If JupyterLab terminates while using Claude Code (SLURM walltime, preemption, or local process crash), the next MCP tool call will fail with:
 
 ```
 JupyterLab not responding. Restart with: jlab-mcp start
 ```
 
-Run `jlab-mcp start` in your other terminal to get a new compute node.
+Run `jlab-mcp start` in your other terminal to get a new server.
 
 ## Summary Diagram
+
+### SLURM Mode
 
 ```
 Terminal 1 (login node)              Shared FS                Compute Node (ravg1011)
@@ -236,6 +293,55 @@ Terminal 1
 
 jlab-mcp stop
   | scancel 24215408 -------------------------------------------------> SLURM job cancelled
+  v
+Done
+```
+
+### Local Mode
+
+```
+Terminal 1                               Local Machine
+-------------------                      -------------
+
+jlab-mcp start
+  |
+  | subprocess.Popen("jupyter lab") --> JupyterLab starts (PID 12345)
+  | GET /api/status (poll) <----------- responds when ready
+  | writes server-status
+  v
+"JupyterLab ready at http://127.0.0.1:18432 (PID 12345)"
+"Press Ctrl+C to stop."
+  | (blocks in foreground)
+
+
+Terminal 2
+-------------------
+
+claude (starts Claude Code)
+  | stdin/stdout
+  v
+MCP Server starts
+  | reads server-status (same format, MODE=local)
+  |
+  |-- Claude calls start_new_session
+  |   POST /api/kernels ----------------> kernel-1 started
+  |   create notebook.ipynb
+  |
+  |-- Claude calls execute_code
+  |   WS execute_request ----------------> runs code locally
+  |   <- stream/display_data <-----------+
+  |   save cell --> notebook.ipynb
+  |
+  |-- User exits Claude Code
+  |   MCP server stops (kernels cleaned up, JupyterLab stays alive)
+  v
+
+
+Terminal 1
+-------------------
+
+Ctrl+C (or jlab-mcp stop from another terminal)
+  | SIGTERM to PID 12345 --> JupyterLab stopped
   v
 Done
 ```

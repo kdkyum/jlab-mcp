@@ -9,11 +9,11 @@ from pathlib import Path
 from jlab_mcp import config
 
 
-def _random_port() -> int:
+def random_port() -> int:
     return random.randint(*config.PORT_RANGE)
 
 
-def _generate_token() -> str:
+def generate_token() -> str:
     return secrets.token_hex(24)
 
 
@@ -90,8 +90,8 @@ def submit_job(
 
     Returns (job_id, connection_file_path, port, token).
     """
-    port = _random_port()
-    token = _generate_token()
+    port = random_port()
+    token = generate_token()
     connection_file = str(config.CONNECTION_DIR / f"jupyter-{port}.conn")
 
     script_content = render_slurm_script(
