@@ -51,11 +51,12 @@ class JupyterLabClient:
 
     def interrupt_kernel(self, kernel_id: str) -> None:
         """Interrupt a running kernel."""
-        requests.post(
+        resp = requests.post(
             f"{self.base_url}/api/kernels/{kernel_id}/interrupt",
             headers=self._headers,
             timeout=10,
         )
+        resp.raise_for_status()
 
     def list_kernels(self) -> list[dict]:
         """List all running kernels."""

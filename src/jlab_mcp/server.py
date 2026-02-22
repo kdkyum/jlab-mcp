@@ -309,6 +309,7 @@ def execute_code(session_id: str, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
+    session.jupyter_client.interrupt_kernel(session.kernel_id)
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.add_code_cell(
         session.notebook_path, code, outputs
@@ -329,6 +330,7 @@ def edit_cell(session_id: str, cell_index: int, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
+    session.jupyter_client.interrupt_kernel(session.kernel_id)
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.edit_cell(
         session.notebook_path, cell_index, code, outputs
@@ -382,6 +384,24 @@ def shutdown_session(session_id: str) -> str:
         f"Session {session_id} shutdown successfully. "
         f"Notebook saved at {session.notebook_path}"
     )
+
+
+@mcp.tool()
+def interrupt_kernel(session_id: str) -> str:
+    """Interrupt the running kernel to stop execution.
+
+    Use this when code is taking too long and you want to cancel it
+    without shutting down the session. Safe to call on an idle kernel.
+
+    Args:
+        session_id: Session identifier.
+
+    Returns:
+        Confirmation message.
+    """
+    session = _get_session(session_id)
+    session.jupyter_client.interrupt_kernel(session.kernel_id)
+    return f"Kernel interrupted for session {session_id}"
 
 
 @mcp.tool(output_schema=None)
