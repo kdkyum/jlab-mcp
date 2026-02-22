@@ -132,7 +132,7 @@ def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
     if debug:
         log.debug(
             "Submitting SLURM job: partition=%s gpu=%s time=%s",
-            config.SLURM_PARTITION, config.SLURM_GPU, config.SLURM_TIME,
+            config.SLURM_PARTITION, config.SLURM_GRES, config.SLURM_TIME,
         )
     job_id, conn_file, port, token = submit_job()
     _write_status("pending", job_id=job_id)

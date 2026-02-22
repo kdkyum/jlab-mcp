@@ -1,3 +1,4 @@
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -7,11 +8,27 @@ import nbformat
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
 
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a string for use as a filename."""
+    # Replace path separators and other unsafe chars with underscores
+    name = re.sub(r'[/\\:*?"<>|\x00]', "_", name)
+    # Remove leading/trailing dots and spaces
+    name = name.strip(". ")
+    # Collapse multiple underscores
+    name = re.sub(r"_+", "_", name)
+    # Truncate to reasonable length
+    name = name[:200]
+    if not name:
+        name = "unnamed"
+    return name
+
+
 class NotebookManager:
     """Manages notebook state using nbformat."""
 
     def create_notebook(self, name: str, directory: str | Path) -> Path:
         """Create an empty .ipynb notebook. Returns the path."""
+        name = _sanitize_filename(name)
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         nb_path = directory / f"{name}.ipynb"
@@ -99,9 +116,17 @@ class NotebookManager:
         return len(nb.cells)
 
     def copy_notebook(self, src_path: Path | str, suffix: str = "_continued") -> Path:
-        """Copy a notebook with a suffix. Returns the new path."""
+        """Copy a notebook with a suffix. Returns the new path.
+
+        If the destination already exists, appends _2, _3, etc.
+        """
         src = Path(src_path)
         dst = src.with_stem(src.stem + suffix)
+        if dst.exists():
+            counter = 2
+            while dst.exists():
+                dst = src.with_stem(f"{src.stem}{suffix}_{counter}")
+                counter += 1
         shutil.copy2(src, dst)
         return dst
 

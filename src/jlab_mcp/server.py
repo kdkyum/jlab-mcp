@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -46,6 +47,7 @@ class Session:
 sessions: dict[str, Session] = {}
 _server: JupyterServer | None = None
 _server_lock = threading.Lock()
+_sessions_lock = threading.Lock()
 
 
 def _read_status_file() -> dict:
@@ -102,7 +104,8 @@ def _get_or_start_server() -> JupyterServer:
                 return _server
             logger.warning("JupyterLab server not responding, reconnecting...")
             _server = None
-            sessions.clear()
+            with _sessions_lock:
+                sessions.clear()
 
         _server = _connect_to_server()
         logger.info(f"Connected to JupyterLab on {_server.hostname}")
@@ -115,12 +118,13 @@ def _get_or_start_server() -> JupyterServer:
 
 def _cleanup_kernels():
     """Shutdown all kernels. Does NOT cancel the SLURM job."""
-    for sid, session in list(sessions.items()):
-        try:
-            session.jupyter_client.shutdown_kernel(session.kernel_id)
-        except Exception:
-            pass
-    sessions.clear()
+    with _sessions_lock:
+        for sid, session in list(sessions.items()):
+            try:
+                session.jupyter_client.shutdown_kernel(session.kernel_id)
+            except Exception:
+                pass
+        sessions.clear()
     logger.info("All sessions cleaned up")
 
 
@@ -132,7 +136,7 @@ def _validate_notebook_path(notebook_path: str) -> Path:
     """Validate that notebook_path is within NOTEBOOK_DIR to prevent traversal."""
     nb_path = Path(notebook_path).resolve()
     notebook_dir = config.NOTEBOOK_DIR.resolve()
-    if not str(nb_path).startswith(str(notebook_dir)):
+    if not nb_path.is_relative_to(notebook_dir):
         raise ValueError(
             f"Notebook path must be within {notebook_dir}, "
             f"got: {notebook_path}"
@@ -158,6 +162,8 @@ def _format_outputs(outputs: list[dict]) -> list:
             parts.append(Image(data=image_bytes, format="png"))
         elif out["type"] == "error":
             tb = "\n".join(out.get("traceback", []))
+            # Strip ANSI escape codes from IPython tracebacks
+            tb = re.sub(r"\x1b\[[0-9;]*m", "", tb)
             parts.append(
                 f"Error: {out.get('ename', 'Error')}: "
                 f"{out.get('evalue', '')}\n{tb}"
@@ -190,15 +196,17 @@ def _register_session(
         notebook_path=nb_path,
         notebook_manager=nb_manager,
     )
-    sessions[session_id] = session
+    with _sessions_lock:
+        sessions[session_id] = session
     return session
 
 
 def _get_session(session_id: str) -> Session:
     """Look up a session by ID or raise ValueError."""
-    if session_id not in sessions:
-        raise ValueError(f"Unknown session: {session_id}")
-    return sessions[session_id]
+    with _sessions_lock:
+        if session_id not in sessions:
+            raise ValueError(f"Unknown session: {session_id}")
+        return sessions[session_id]
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +228,12 @@ def start_new_session(experiment_name: str) -> dict:
     server = _get_or_start_server()
     kernel_id = _start_kernel(server)
 
-    nb_manager = NotebookManager()
-    nb_path = nb_manager.create_notebook(experiment_name, config.NOTEBOOK_DIR)
+    try:
+        nb_manager = NotebookManager()
+        nb_path = nb_manager.create_notebook(experiment_name, config.NOTEBOOK_DIR)
+    except Exception:
+        server.client.shutdown_kernel(kernel_id)
+        raise
 
     session = _register_session(kernel_id, server.client, nb_path, nb_manager)
     return {
@@ -249,12 +261,16 @@ def start_session_resume_notebook(
     server = _get_or_start_server()
     kernel_id = _start_kernel(server)
 
-    nb_manager = NotebookManager()
+    try:
+        nb_manager = NotebookManager()
 
-    def execute_fn(code: str) -> list[dict]:
-        return server.client.execute_code(kernel_id, code)
+        def execute_fn(code: str) -> list[dict]:
+            return server.client.execute_code(kernel_id, code)
 
-    errors = nb_manager.restore_notebook(nb_path, execute_fn)
+        errors = nb_manager.restore_notebook(nb_path, execute_fn)
+    except Exception:
+        server.client.shutdown_kernel(kernel_id)
+        raise
 
     session = _register_session(kernel_id, server.client, nb_path, nb_manager)
     return {
@@ -283,8 +299,12 @@ def start_session_continue_notebook(
     server = _get_or_start_server()
     kernel_id = _start_kernel(server)
 
-    nb_manager = NotebookManager()
-    forked_path = nb_manager.copy_notebook(nb_path, suffix="_continued")
+    try:
+        nb_manager = NotebookManager()
+        forked_path = nb_manager.copy_notebook(nb_path, suffix="_continued")
+    except Exception:
+        server.client.shutdown_kernel(kernel_id)
+        raise
 
     session = _register_session(
         kernel_id, server.client, forked_path, nb_manager
@@ -310,7 +330,10 @@ def execute_code(session_id: str, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    session.jupyter_client.interrupt_kernel(session.kernel_id)
+    try:
+        session.jupyter_client.interrupt_kernel(session.kernel_id)
+    except Exception:
+        pass  # kernel may already be dead; execute_code will detect it
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.add_code_cell(
         session.notebook_path, code, outputs
@@ -331,7 +354,10 @@ def edit_cell(session_id: str, cell_index: int, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    session.jupyter_client.interrupt_kernel(session.kernel_id)
+    try:
+        session.jupyter_client.interrupt_kernel(session.kernel_id)
+    except Exception:
+        pass  # kernel may already be dead; execute_code will detect it
     outputs = session.jupyter_client.execute_code(session.kernel_id, code)
     session.notebook_manager.edit_cell(
         session.notebook_path, cell_index, code, outputs
@@ -372,8 +398,10 @@ def shutdown_session(session_id: str) -> str:
     Returns:
         Confirmation message.
     """
-    _get_session(session_id)
-    session = sessions.pop(session_id)
+    with _sessions_lock:
+        if session_id not in sessions:
+            raise ValueError(f"Unknown session: {session_id}")
+        session = sessions.pop(session_id)
     logger.info(f"Shutting down session {session_id} (kernel={session.kernel_id})")
     try:
         session.jupyter_client.shutdown_kernel(session.kernel_id)
@@ -443,90 +471,91 @@ def ping() -> dict:
 
 
 @mcp.tool()
-def check_resources(session_id: str) -> dict:
+def check_resources() -> dict:
     """Check compute resource usage: CPU, memory, and GPU.
 
-    Runs lightweight commands on the session's kernel to report current
-    resource utilization. Use this to monitor memory pressure or GPU usage.
-
-    Args:
-        session_id: Session identifier.
+    Runs on a throwaway kernel so it does not pollute session state.
+    No session required — only needs a running JupyterLab server.
 
     Returns:
         Dict with cpu, memory, and gpu resource information.
     """
-    session = _get_session(session_id)
-
     code = """\
-import json as _json
+import json, os, subprocess
 
-_result = {}
+result = {}
 
 # --- CPU ---
 try:
-    import os
-    _nproc = os.cpu_count()
-    _load1, _load5, _load15 = os.getloadavg()
-    _result["cpu"] = {
-        "count": _nproc,
-        "load_1m": round(_load1, 2),
-        "load_5m": round(_load5, 2),
-        "load_15m": round(_load15, 2),
+    nproc = os.cpu_count()
+    load1, load5, load15 = os.getloadavg()
+    result["cpu"] = {
+        "count": nproc,
+        "load_1m": round(load1, 2),
+        "load_5m": round(load5, 2),
+        "load_15m": round(load15, 2),
     }
-except Exception as _e:
-    _result["cpu"] = {"error": str(_e)}
+except Exception as e:
+    result["cpu"] = {"error": str(e)}
 
 # --- Memory ---
 try:
-    with open("/proc/meminfo") as _f:
-        _mem = {}
-        for _line in _f:
-            _parts = _line.split()
-            if _parts[0] in ("MemTotal:", "MemAvailable:", "MemFree:"):
-                _mem[_parts[0].rstrip(":")] = int(_parts[1])
-    _total = _mem.get("MemTotal", 0)
-    _avail = _mem.get("MemAvailable", _mem.get("MemFree", 0))
-    _used = _total - _avail
-    _result["memory"] = {
-        "total_mb": round(_total / 1024),
-        "used_mb": round(_used / 1024),
-        "available_mb": round(_avail / 1024),
-        "percent_used": round(_used / _total * 100, 1) if _total else 0,
+    with open("/proc/meminfo") as f:
+        mem = {}
+        for line in f:
+            parts = line.split()
+            if parts[0] in ("MemTotal:", "MemAvailable:", "MemFree:"):
+                mem[parts[0].rstrip(":")] = int(parts[1])
+    total = mem.get("MemTotal", 0)
+    avail = mem.get("MemAvailable", mem.get("MemFree", 0))
+    used = total - avail
+    result["memory"] = {
+        "total_mb": round(total / 1024),
+        "used_mb": round(used / 1024),
+        "available_mb": round(avail / 1024),
+        "percent_used": round(used / total * 100, 1) if total else 0,
     }
-except Exception as _e:
-    _result["memory"] = {"error": str(_e)}
+except Exception as e:
+    result["memory"] = {"error": str(e)}
 
 # --- GPU ---
 try:
-    import subprocess
-    _r = subprocess.run(
+    r = subprocess.run(
         ["nvidia-smi",
          "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
          "--format=csv,noheader,nounits"],
         capture_output=True, text=True, timeout=10,
     )
-    _gpus = []
-    for _line in _r.stdout.strip().splitlines():
-        _p = [_x.strip() for _x in _line.split(",")]
-        if len(_p) >= 6:
-            _gpus.append({
-                "index": int(_p[0]),
-                "name": _p[1],
-                "memory_used_mb": int(_p[2]),
-                "memory_total_mb": int(_p[3]),
-                "utilization_percent": int(_p[4]),
-                "temperature_c": int(_p[5]),
+    gpus = []
+    for line in r.stdout.strip().splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) >= 6:
+            gpus.append({
+                "index": int(p[0]),
+                "name": p[1],
+                "memory_used_mb": int(p[2]),
+                "memory_total_mb": int(p[3]),
+                "utilization_percent": int(p[4]),
+                "temperature_c": int(p[5]),
             })
-    _result["gpu"] = _gpus if _gpus else {"error": "no GPUs found"}
+    result["gpu"] = gpus if gpus else {"error": "no GPUs found"}
 except FileNotFoundError:
-    _result["gpu"] = {"error": "nvidia-smi not found (no GPU)"}
-except Exception as _e:
-    _result["gpu"] = {"error": str(_e)}
+    result["gpu"] = {"error": "nvidia-smi not found (no GPU)"}
+except Exception as e:
+    result["gpu"] = {"error": str(e)}
 
-print(_json.dumps(_result))
+print(json.dumps(result))
 """
-    session.jupyter_client.interrupt_kernel(session.kernel_id)
-    outputs = session.jupyter_client.execute_code(session.kernel_id, code, timeout=30)
+    server = _get_or_start_server()
+    kernel_id = server.client.start_kernel()
+    time.sleep(2)
+    try:
+        outputs = server.client.execute_code(kernel_id, code, timeout=30)
+    finally:
+        try:
+            server.client.shutdown_kernel(kernel_id)
+        except Exception:
+            pass
 
     for out in outputs:
         if out["type"] == "text":
@@ -587,15 +616,17 @@ def server_status() -> dict:
             "healthy": healthy,
         }
 
-    session_info = {}
-    for sid, session in sessions.items():
-        session_info[sid] = {
-            "kernel_id": session.kernel_id,
-            "notebook_path": str(session.notebook_path),
-        }
+    with _sessions_lock:
+        session_info = {}
+        for sid, session in sessions.items():
+            session_info[sid] = {
+                "kernel_id": session.kernel_id,
+                "notebook_path": str(session.notebook_path),
+            }
+        session_count = len(sessions)
 
     return {
         "server": server_info if server_info else "not connected",
-        "active_sessions": len(sessions),
+        "active_sessions": session_count,
         "sessions": session_info,
     }

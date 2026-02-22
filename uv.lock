@@ -1189,7 +1189,6 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pillow" },
-    { name = "psutil" },
     { name = "requests" },
     { name = "websocket-client" },
 ]
@@ -1209,7 +1208,6 @@ requires-dist = [
     { name = "nbformat", specifier = ">=5.10.4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=11.3.0" },
-    { name = "psutil", specifier = ">=7.0.0" },
     { name = "requests", specifier = ">=2.32.4" },
     { name = "websocket-client", specifier = ">=1.7.0" },
 ]

@@ -9,7 +9,6 @@ dependencies = [
     "nbformat>=5.10.4",
     "requests>=2.32.4",
     "pillow>=11.3.0",
-    "psutil>=7.0.0",
     "websocket-client>=1.7.0",
     "jupyterlab>=4.0",
     "ipykernel>=6.30.0",

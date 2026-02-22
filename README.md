@@ -156,7 +156,7 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 | `interrupt_kernel` | Interrupt running execution without shutting down the session |
 | `shutdown_session` | Stop kernel (SLURM job stays alive for other sessions) |
 | `ping` | Lightweight health check — verify JupyterLab is reachable (no kernel needed) |
-| `check_resources` | Check CPU, memory, and GPU usage on the compute node |
+| `check_resources` | Check CPU, memory, and GPU usage on the compute node (no session needed) |
 
 Resource: `jlab-mcp://server/status` — returns shared server info and active sessions.
 

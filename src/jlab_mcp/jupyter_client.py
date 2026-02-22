@@ -27,7 +27,7 @@ class JupyterLabClient:
                 timeout=10,
             )
             return resp.status_code == 200
-        except requests.ConnectionError:
+        except (requests.ConnectionError, requests.Timeout):
             return False
 
     def start_kernel(self, kernel_name: str = "python3") -> str:
@@ -130,6 +130,18 @@ class JupyterLabClient:
         while True:
             try:
                 raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                outputs.append({
+                    "type": "error",
+                    "ename": "ExecutionTimeout",
+                    "evalue": (
+                        f"Execution timed out after {timeout} seconds. "
+                        "The kernel is still running — use interrupt_kernel "
+                        "to cancel, or increase the timeout."
+                    ),
+                    "traceback": [],
+                })
+                break
             except (
                 websocket.WebSocketConnectionClosedException,
                 ConnectionError,
