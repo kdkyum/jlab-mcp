@@ -23,8 +23,15 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
 
     log_file = config.LOG_DIR / f"jupyter-local-{port}.log"
 
+    # Use the project's .venv Python so kernels have project dependencies
+    venv_python = config.PROJECT_DIR / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        python = str(venv_python)
+    else:
+        python = sys.executable
+
     cmd = [
-        sys.executable,
+        python,
         "-m",
         "jupyter",
         "lab",
@@ -35,11 +42,19 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
         f"--notebook-dir={config.NOTEBOOK_DIR}",
     ]
 
+    # Set VIRTUAL_ENV so JupyterLab picks up the project's venv
+    env = os.environ.copy()
+    venv_dir = config.PROJECT_DIR / ".venv"
+    if venv_dir.exists():
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        env["PATH"] = f"{venv_dir / 'bin'}:{env.get('PATH', '')}"
+
     with open(log_file, "w") as log_fh:
         proc = subprocess.Popen(
             cmd,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
+            env=env,
         )
 
     logger.info(f"Started JupyterLab (PID {proc.pid}) on {hostname}:{port}")
