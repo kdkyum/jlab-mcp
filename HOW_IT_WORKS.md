@@ -144,9 +144,35 @@ The MCP server reads this same status file to connect, regardless of mode.
 
 ## 2. MCP Server Connects
 
-When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 7 tools + 1 resource.
+When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 10 tools + 1 resource.
 
 The MCP server **does not manage SLURM** — it only reads the status file written by `jlab-mcp start` to find the running JupyterLab.
+
+### Diagnostic Tools (no session required)
+
+**`ping`** — Lightweight health check that reads the status file and calls `GET /api/status` on JupyterLab. No kernel needed. Returns connection status, hostname, and active session count.
+
+```python
+# Reads status file → makes one HTTP GET → returns dict
+{"status": "ok", "hostname": "ravg1011", "url": "http://ravg1011:18432", "healthy": true, "active_sessions": 1}
+```
+
+### Resource Monitoring
+
+**`check_resources`** — Runs a lightweight script on the session's kernel to report CPU, memory, and GPU usage:
+
+```python
+check_resources(session_id="031ec533")
+# Returns:
+{
+    "cpu": {"count": 18, "load_1m": 0.5, "load_5m": 0.3, "load_15m": 0.2},
+    "memory": {"total_mb": 125000, "used_mb": 8500, "available_mb": 116500, "percent_used": 6.8},
+    "gpu": [{"index": 0, "name": "NVIDIA A100-SXM4-80GB", "memory_used_mb": 2048,
+             "memory_total_mb": 81920, "utilization_percent": 35, "temperature_c": 42}]
+}
+```
+
+This executes on the **same kernel** as your session — it reads `/proc/meminfo` for memory, `os.getloadavg()` for CPU, and `nvidia-smi` for GPU. The code is not saved to the notebook.
 
 ## 3. Claude Calls `start_new_session`
 
@@ -169,7 +195,15 @@ start_new_session(experiment_name="my_experiment")
 execute_code(session_id="031ec533", code="import torch; print(torch.cuda.get_device_name(0))")
 ```
 
-### 4a. Open WebSocket to Kernel
+### 4a. Auto-interrupt Previous Execution
+
+Before sending new code, the kernel is interrupted to cancel any still-running execution from a previously cancelled tool call. This is a no-op on an idle kernel.
+
+```python
+requests.post("http://ravg1011:18432/api/kernels/kernel-uuid-1234/interrupt")
+```
+
+### 4b. Open WebSocket to Kernel
 
 ```python
 ws = websocket.create_connection(
@@ -177,7 +211,7 @@ ws = websocket.create_connection(
 )
 ```
 
-### 4b. Send `execute_request` (Jupyter Message Protocol)
+### 4c. Send `execute_request` (Jupyter Message Protocol)
 
 ```python
 ws.send(json.dumps({
@@ -187,7 +221,7 @@ ws.send(json.dumps({
 }))
 ```
 
-### 4c. Receive Messages Until Kernel Goes Idle
+### 4d. Receive Messages Until Kernel Goes Idle
 
 ```
 <- {"msg_type": "stream",  "content": {"text": "NVIDIA A100-SXM4-80GB"}}  # stdout
@@ -200,13 +234,13 @@ If the code produces a plot (`plt.show()` with `%matplotlib inline`):
 <- {"msg_type": "display_data", "content": {"data": {"image/png": "iVBOR..."}}}  # base64 PNG
 ```
 
-### 4d. Process Outputs
+### 4e. Process Outputs
 
 - **Text** -> returned as string in a list
 - **Images** -> decoded, resized to 512px max, returned as FastMCP `Image` object -> becomes MCP `ImageContent` -> **Claude Code sees the actual plot**
 - **Errors** -> traceback returned as string in a list
 
-### 4e. Save to Notebook
+### 4f. Save to Notebook
 
 The code and outputs are appended as a cell to `my_experiment.ipynb` on the shared filesystem.
 

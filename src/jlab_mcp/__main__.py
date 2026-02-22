@@ -15,11 +15,20 @@ def main():
         stream=sys.stderr,
     )
 
-    if len(sys.argv) > 1:
-        cmd = sys.argv[1]
+    args = sys.argv[1:]
+    debug = "--debug" in args
+    if debug:
+        args.remove("--debug")
+
+    if debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("jlab-mcp").setLevel(logging.DEBUG)
+
+    if args:
+        cmd = args[0]
         if cmd == "start":
-            time_limit = sys.argv[2] if len(sys.argv) > 2 else None
-            _cmd_start(time_limit=time_limit)
+            time_limit = args[1] if len(args) > 1 else None
+            _cmd_start(time_limit=time_limit, debug=debug)
         elif cmd == "stop":
             _cmd_stop()
         elif cmd == "wait":
@@ -28,7 +37,7 @@ def main():
             _cmd_status()
         else:
             print(f"Unknown command: {cmd}", file=sys.stderr)
-            print("Usage: jlab-mcp [start|stop|wait|status]", file=sys.stderr)
+            print("Usage: jlab-mcp [start|stop|wait|status] [--debug]", file=sys.stderr)
             sys.exit(1)
         return
 
@@ -75,15 +84,15 @@ def _read_status():
 # CLI commands
 # ---------------------------------------------------------------------------
 
-def _cmd_start(time_limit: str | None = None):
+def _cmd_start(time_limit: str | None = None, debug: bool = False):
     """Start JupyterLab — dispatches to SLURM or local mode."""
     if config.RUN_MODE == "local":
-        _cmd_start_local()
+        _cmd_start_local(debug=debug)
     else:
-        _cmd_start_slurm(time_limit=time_limit)
+        _cmd_start_slurm(time_limit=time_limit, debug=debug)
 
 
-def _cmd_start_slurm(time_limit: str | None = None):
+def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
     """Submit SLURM job and wait until JupyterLab is ready."""
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.slurm import (
@@ -93,11 +102,15 @@ def _cmd_start_slurm(time_limit: str | None = None):
         wait_for_job_running,
     )
 
+    log = logging.getLogger("jlab-mcp")
+
     if time_limit:
         config.SLURM_TIME = time_limit
 
     # Check if already running
     state, info = _read_status()
+    if debug:
+        log.debug("Status file: state=%s info=%s", state, info)
     if state == "ready":
         job_id = info.get("JOB_ID", "")
         if job_id and is_job_running(job_id):
@@ -105,16 +118,27 @@ def _cmd_start_slurm(time_limit: str | None = None):
             print(f"JupyterLab already running on {hostname} (job {job_id})")
             return
         # Stale status file — job no longer running
+        if debug:
+            log.debug("Stale status file (job not running), clearing")
         _clear_status()
     elif state in ("pending", "starting"):
         job_id = info.get("JOB_ID", "")
         if job_id and not is_job_running(job_id):
+            if debug:
+                log.debug("Stale status file (state=%s, job gone), clearing", state)
             _clear_status()
 
     # Submit new job
+    if debug:
+        log.debug(
+            "Submitting SLURM job: partition=%s gpu=%s time=%s",
+            config.SLURM_PARTITION, config.SLURM_GPU, config.SLURM_TIME,
+        )
     job_id, conn_file, port, token = submit_job()
     _write_status("pending", job_id=job_id)
     print(f"SLURM job {job_id} submitted, waiting in queue...", flush=True)
+    if debug:
+        log.debug("Connection file: %s", conn_file)
 
     try:
         hostname = wait_for_job_running(job_id, timeout=300)
@@ -141,12 +165,18 @@ def _cmd_start_slurm(time_limit: str | None = None):
     print(f"Waiting for JupyterLab at {client.base_url}...", flush=True)
 
     start_t = time.time()
+    attempt = 0
     while time.time() - start_t < 120:
         if not is_job_running(job_id):
             _write_status("error", job_id=job_id, message="Job cancelled")
             print(f"SLURM job {job_id} is no longer running.", file=sys.stderr)
             sys.exit(1)
+        attempt += 1
+        if debug:
+            log.debug("Health check attempt %d -> %s", attempt, client.base_url)
         if client.health_check():
+            if debug:
+                log.debug("Health check passed after %d attempts", attempt)
             break
         time.sleep(3)
     else:
@@ -158,16 +188,22 @@ def _cmd_start_slurm(time_limit: str | None = None):
         sys.exit(1)
 
     _write_status("ready", job_id=job_id, hostname=host, port=p, token=tok)
+    if debug:
+        log.debug("Status file written: state=ready host=%s port=%s", host, p)
     print(f"JupyterLab ready at {client.base_url}", flush=True)
 
 
-def _cmd_start_local():
+def _cmd_start_local(debug: bool = False):
     """Start JupyterLab as a local subprocess (foreground)."""
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.local import is_local_running, start_jupyter_local, stop_jupyter_local
 
+    log = logging.getLogger("jlab-mcp")
+
     # Check if already running
     state, info = _read_status()
+    if debug:
+        log.debug("Status file: state=%s info=%s", state, info)
     if state == "ready" and info.get("MODE") == "local":
         pid = int(info.get("PID", "0"))
         if pid and is_local_running(pid):
@@ -175,18 +211,25 @@ def _cmd_start_local():
             port = info.get("PORT", "?")
             print(f"JupyterLab already running at {hostname}:{port} (PID {pid})")
             return
+        if debug:
+            log.debug("Stale status file (process not running), clearing")
         _clear_status()
 
+    if debug:
+        log.debug("Starting local JupyterLab subprocess")
     proc, hostname, port, token = start_jupyter_local()
     _write_status(
         "starting", mode="local", pid=str(proc.pid),
         hostname=hostname, port=str(port), token=token,
     )
     print(f"JupyterLab starting (PID {proc.pid})...", flush=True)
+    if debug:
+        log.debug("Subprocess PID=%d, target=%s:%s", proc.pid, hostname, port)
 
     # Wait for health check
     client = JupyterLabClient(hostname, port, token)
     start_t = time.time()
+    attempt = 0
     while time.time() - start_t < 60:
         if proc.poll() is not None:
             _write_status("error", mode="local", message="Process exited early")
@@ -196,7 +239,12 @@ def _cmd_start_local():
             )
             _clear_status()
             sys.exit(1)
+        attempt += 1
+        if debug:
+            log.debug("Health check attempt %d -> %s", attempt, client.base_url)
         if client.health_check():
+            if debug:
+                log.debug("Health check passed after %d attempts", attempt)
             break
         time.sleep(1)
     else:
@@ -213,6 +261,8 @@ def _cmd_start_local():
         "ready", mode="local", pid=str(proc.pid),
         hostname=hostname, port=str(port), token=token,
     )
+    if debug:
+        log.debug("Status file written: state=ready pid=%d host=%s port=%s", proc.pid, hostname, port)
     print(f"JupyterLab ready at {client.base_url} (PID {proc.pid})", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 

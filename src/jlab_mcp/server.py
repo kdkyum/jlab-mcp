@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import threading
 import time
@@ -402,6 +403,141 @@ def interrupt_kernel(session_id: str) -> str:
     session = _get_session(session_id)
     session.jupyter_client.interrupt_kernel(session.kernel_id)
     return f"Kernel interrupted for session {session_id}"
+
+
+@mcp.tool()
+def ping() -> dict:
+    """Check if JupyterLab is reachable and responding.
+
+    Lightweight health check — no kernel needed. Use this to verify
+    the connection before starting a session.
+
+    Returns:
+        Dict with status, hostname, url, active sessions count.
+    """
+    info = _read_status_file()
+    state = info.get("STATE")
+
+    if not info or state is None:
+        return {"status": "no_server", "message": "Run jlab-mcp start"}
+    if state != "ready":
+        return {"status": state, "message": f"Server not ready (state={state})"}
+
+    hostname = info.get("HOSTNAME", "")
+    port = info.get("PORT", "")
+    token = info.get("TOKEN", "")
+
+    if not (hostname and port and token):
+        return {"status": "error", "message": "Incomplete status file"}
+
+    client = JupyterLabClient(hostname, int(port), token)
+    healthy = client.health_check()
+
+    return {
+        "status": "ok" if healthy else "unreachable",
+        "hostname": hostname,
+        "url": f"http://{hostname}:{port}",
+        "healthy": healthy,
+        "active_sessions": len(sessions),
+    }
+
+
+@mcp.tool()
+def check_resources(session_id: str) -> dict:
+    """Check compute resource usage: CPU, memory, and GPU.
+
+    Runs lightweight commands on the session's kernel to report current
+    resource utilization. Use this to monitor memory pressure or GPU usage.
+
+    Args:
+        session_id: Session identifier.
+
+    Returns:
+        Dict with cpu, memory, and gpu resource information.
+    """
+    session = _get_session(session_id)
+
+    code = """\
+import json as _json
+
+_result = {}
+
+# --- CPU ---
+try:
+    import os
+    _nproc = os.cpu_count()
+    _load1, _load5, _load15 = os.getloadavg()
+    _result["cpu"] = {
+        "count": _nproc,
+        "load_1m": round(_load1, 2),
+        "load_5m": round(_load5, 2),
+        "load_15m": round(_load15, 2),
+    }
+except Exception as _e:
+    _result["cpu"] = {"error": str(_e)}
+
+# --- Memory ---
+try:
+    with open("/proc/meminfo") as _f:
+        _mem = {}
+        for _line in _f:
+            _parts = _line.split()
+            if _parts[0] in ("MemTotal:", "MemAvailable:", "MemFree:"):
+                _mem[_parts[0].rstrip(":")] = int(_parts[1])
+    _total = _mem.get("MemTotal", 0)
+    _avail = _mem.get("MemAvailable", _mem.get("MemFree", 0))
+    _used = _total - _avail
+    _result["memory"] = {
+        "total_mb": round(_total / 1024),
+        "used_mb": round(_used / 1024),
+        "available_mb": round(_avail / 1024),
+        "percent_used": round(_used / _total * 100, 1) if _total else 0,
+    }
+except Exception as _e:
+    _result["memory"] = {"error": str(_e)}
+
+# --- GPU ---
+try:
+    import subprocess
+    _r = subprocess.run(
+        ["nvidia-smi",
+         "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=10,
+    )
+    _gpus = []
+    for _line in _r.stdout.strip().splitlines():
+        _p = [_x.strip() for _x in _line.split(",")]
+        if len(_p) >= 6:
+            _gpus.append({
+                "index": int(_p[0]),
+                "name": _p[1],
+                "memory_used_mb": int(_p[2]),
+                "memory_total_mb": int(_p[3]),
+                "utilization_percent": int(_p[4]),
+                "temperature_c": int(_p[5]),
+            })
+    _result["gpu"] = _gpus if _gpus else {"error": "no GPUs found"}
+except FileNotFoundError:
+    _result["gpu"] = {"error": "nvidia-smi not found (no GPU)"}
+except Exception as _e:
+    _result["gpu"] = {"error": str(_e)}
+
+print(_json.dumps(_result))
+"""
+    session.jupyter_client.interrupt_kernel(session.kernel_id)
+    outputs = session.jupyter_client.execute_code(session.kernel_id, code, timeout=30)
+
+    for out in outputs:
+        if out["type"] == "text":
+            try:
+                return json.loads(out["content"].strip())
+            except json.JSONDecodeError:
+                pass
+        if out["type"] == "error":
+            return {"error": f"{out.get('ename')}: {out.get('evalue')}"}
+
+    return {"error": "no output from resource check"}
 
 
 @mcp.tool(output_schema=None)
