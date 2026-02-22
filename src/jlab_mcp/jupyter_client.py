@@ -128,17 +128,53 @@ class JupyterLabClient:
         ws.settimeout(timeout)
 
         while True:
-            raw = ws.recv()
+            try:
+                raw = ws.recv()
+            except (
+                websocket.WebSocketConnectionClosedException,
+                ConnectionError,
+                OSError,
+            ):
+                outputs.append({
+                    "type": "error",
+                    "ename": "KernelDied",
+                    "evalue": (
+                        "Kernel died during execution (likely OOM or crash). "
+                        "All in-memory state is lost. "
+                        "Start a new session to continue."
+                    ),
+                    "traceback": [],
+                })
+                break
+
             msg = json.loads(raw)
+
+            # Detect kernel death/restart BEFORE filtering by parent_msg_id.
+            # JupyterLab broadcasts these on IOPub with no parent_header,
+            # so the parent_msg_id filter would skip them.
+            msg_type = msg.get("msg_type") or msg.get("header", {}).get(
+                "msg_type", ""
+            )
+            if msg_type == "status":
+                exec_state = msg["content"].get("execution_state")
+                if exec_state in ("restarting", "dead"):
+                    outputs.append({
+                        "type": "error",
+                        "ename": "KernelDied",
+                        "evalue": (
+                            f"Kernel {exec_state} during execution "
+                            "(likely OOM or crash). "
+                            "All in-memory state is lost. "
+                            "Start a new session to continue."
+                        ),
+                        "traceback": [],
+                    })
+                    break
 
             # Only process messages that are replies to our request
             parent_msg_id = msg.get("parent_header", {}).get("msg_id", "")
             if parent_msg_id != msg_id:
                 continue
-
-            msg_type = msg.get("msg_type") or msg.get("header", {}).get(
-                "msg_type", ""
-            )
 
             if msg_type == "stream":
                 text = msg["content"].get("text", "")

@@ -234,6 +234,26 @@ If the code produces a plot (`plt.show()` with `%matplotlib inline`):
 <- {"msg_type": "display_data", "content": {"data": {"image/png": "iVBOR..."}}}  # base64 PNG
 ```
 
+#### Kernel Death Detection
+
+If the kernel dies during execution (OOM, segfault, CUDA error), two things can happen on the WebSocket:
+
+1. **WebSocket closes** — the kernel process is gone, JupyterLab closes the connection. `ws.recv()` raises `WebSocketConnectionClosedException`, caught immediately.
+
+2. **Kernel auto-restarts** — JupyterLab sends a broadcast status message (no `parent_header`):
+   ```
+   <- {"msg_type": "status", "content": {"execution_state": "restarting"}}
+   ```
+   This is checked **before** the `parent_msg_id` filter so it's not skipped.
+
+Both paths return immediately with a `KernelDied` error:
+```
+Error: KernelDied: Kernel restarting during execution (likely OOM or crash).
+All in-memory state is lost. Start a new session to continue.
+```
+
+Without this detection, a kernel death would cause the WebSocket loop to hang silently for up to 300 seconds (the execution timeout), leaving Claude Code with no feedback.
+
 ### 4e. Process Outputs
 
 - **Text** -> returned as string in a list
@@ -269,7 +289,11 @@ jlab-mcp stop
 - **SLURM mode**: runs `scancel` and removes the status file
 - **Local mode**: sends `SIGTERM` to the subprocess and removes the status file (or just press Ctrl+C in the `jlab-mcp start` terminal)
 
-### 5d. Server Death (Walltime / Preemption / Crash)
+### 5d. Kernel Death (OOM / Crash)
+
+If a kernel dies during execution (CUDA OOM, segfault, etc.), JupyterLab auto-restarts the kernel process. The WebSocket detects this immediately via `status: restarting` or connection close and returns a `KernelDied` error to Claude Code. All in-memory state (variables, models, imports) is lost — start a new session to continue.
+
+### 5e. Server Death (Walltime / Preemption / Crash)
 
 If JupyterLab terminates while using Claude Code (SLURM walltime, preemption, or local process crash), the next MCP tool call will fail with:
 
