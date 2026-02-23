@@ -42,7 +42,7 @@ Communication happens via:
 - **server.py** — FastMCP server with 11 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (kernel_id, JupyterLabClient, notebook_path, NotebookManager). All access to `sessions` dict is guarded by `_sessions_lock`.
 - **slurm.py** — Renders SLURM template, runs `sbatch`/`squeue`/`scancel`, polls for job state and connection file. All SLURM output parsing is string-based (no `jq`).
 - **local.py** — Local mode: spawns `jupyter lab` as a subprocess, manages PID-based lifecycle.
-- **jupyter_client.py** — `JupyterLabClient` class: REST API calls (`requests`) for kernel management, WebSocket (`websocket-client`) for code execution. Collects outputs (text/image/error) until kernel goes idle.
+- **jupyter_client.py** — `JupyterLabClient` class: REST API calls (`requests`) for kernel management, WebSocket (`websocket-client`) for code execution. Caches one WebSocket per kernel (`_ws_cache`) to avoid reconnection storms — critical during `restore_notebook` which executes many cells sequentially. Collects outputs (text/image/error) until kernel goes idle.
 - **notebook.py** — `NotebookManager` class: creates/edits/saves `.ipynb` files with `nbformat`. Handles output conversion, cell ID generation, and notebook restoration (re-executing all cells).
 - **config.py** — All defaults overridable via `JLAB_MCP_*` environment variables. Directories auto-created on import.
 - **image_utils.py** — Resizes images >512px maintaining aspect ratio (Pillow). Gracefully returns original bytes on error.
@@ -60,7 +60,8 @@ Communication happens via:
 - All SLURM settings (partition, GPU, modules, etc.) are configurable via `JLAB_MCP_*` env vars — see README.md
 - `server.py` validates notebook paths against `NOTEBOOK_DIR` to prevent path traversal
 - Connection files are created with `umask 077` and cleaned up on session shutdown
-- `execute_code`/`edit_cell`/`execute_scratch` are async and use `_run_with_progress()` to send MCP progress every 15s during long executions, keeping the stdio pipe alive
+- `execute_code`/`edit_cell`/`execute_scratch`/`start_session_resume_notebook` are async and use `_run_with_progress()` to send MCP progress every 15s during long executions, keeping the stdio pipe alive
+- `start_session_resume_notebook` reports per-cell progress via `ctx.report_progress(done, total)` and `ctx.info()` — does NOT use `restore_notebook()` directly, instead iterates cells itself for granular progress
 - Tools returning `Image` objects must use `@mcp.tool(output_schema=None)` and return `list` — otherwise FastMCP fails to serialize `Image` as `ImageContent`
 - `_sessions_lock` must guard all reads/writes to the `sessions` dict (thread safety for concurrent tool calls)
 - Kernel death (OOM, crash) is detected during WebSocket execution via `status: restarting/dead` messages and `WebSocketConnectionClosedException`
