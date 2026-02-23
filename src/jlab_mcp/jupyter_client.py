@@ -1,11 +1,20 @@
 import base64
 import json
+import logging
+import time
 import uuid
 
 import requests
 import websocket
 
 from jlab_mcp.image_utils import resize_image_if_needed
+
+logger = logging.getLogger("jlab-mcp")
+
+# WebSocket recv wakes up every RECV_POLL_INTERVAL seconds so the
+# thread stays responsive and the MCP stdio connection is never
+# considered dead by Claude Code during long-running executions.
+RECV_POLL_INTERVAL = 30
 
 
 class JupyterLabClient:
@@ -69,7 +78,7 @@ class JupyterLabClient:
         return resp.json()
 
     def execute_code(
-        self, kernel_id: str, code: str, timeout: int = 300
+        self, kernel_id: str, code: str, timeout: int | None = None
     ) -> list[dict]:
         """Execute code via kernel WebSocket. Returns list of output dicts.
 
@@ -84,7 +93,7 @@ class JupyterLabClient:
             f"?token={self.token}"
         )
 
-        ws = websocket.create_connection(ws_url, timeout=timeout)
+        ws = websocket.create_connection(ws_url, timeout=RECV_POLL_INTERVAL)
         try:
             return self._execute_on_ws(ws, code, timeout)
         finally:
@@ -98,7 +107,7 @@ class JupyterLabClient:
         return {"type": "image", "content": base64.b64encode(resized).decode()}
 
     def _execute_on_ws(
-        self, ws: websocket.WebSocket, code: str, timeout: int
+        self, ws: websocket.WebSocket, code: str, timeout: int | None
     ) -> list[dict]:
         msg_id = str(uuid.uuid4())
         execute_msg = {
@@ -125,23 +134,32 @@ class JupyterLabClient:
         ws.send(json.dumps(execute_msg))
 
         outputs: list[dict] = []
-        ws.settimeout(timeout)
+        ws.settimeout(RECV_POLL_INTERVAL)
+        start_time = time.time()
 
         while True:
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
-                outputs.append({
-                    "type": "error",
-                    "ename": "ExecutionTimeout",
-                    "evalue": (
-                        f"Execution timed out after {timeout} seconds. "
-                        "The kernel is still running — use interrupt_kernel "
-                        "to cancel, or increase the timeout."
-                    ),
-                    "traceback": [],
-                })
-                break
+                # Check if caller-specified timeout exceeded
+                if timeout is not None:
+                    elapsed = time.time() - start_time
+                    if elapsed >= timeout:
+                        outputs.append({
+                            "type": "error",
+                            "ename": "ExecutionTimeout",
+                            "evalue": (
+                                f"Execution timed out after {timeout} seconds. "
+                                "The kernel is still running — use interrupt_kernel "
+                                "to cancel, or increase the timeout."
+                            ),
+                            "traceback": [],
+                        })
+                        break
+                # No timeout or not yet exceeded — keep waiting
+                elapsed = time.time() - start_time
+                logger.debug("Waiting for kernel output (%.0fs elapsed)", elapsed)
+                continue
             except (
                 websocket.WebSocketConnectionClosedException,
                 ConnectionError,
