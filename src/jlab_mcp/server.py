@@ -268,6 +268,8 @@ async def start_session_resume_notebook(
 ) -> dict:
     """Resume a notebook: re-execute all cells to restore kernel state.
 
+    Reports per-cell progress so Claude Code can track restoration.
+
     Args:
         experiment_name: Name for this session.
         notebook_path: Path to existing notebook to resume.
@@ -281,13 +283,32 @@ async def start_session_resume_notebook(
 
     try:
         nb_manager = NotebookManager()
+        nb = nb_manager.get_notebook(nb_path)
 
-        def execute_fn(code: str) -> list[dict]:
-            return server.client.execute_code(kernel_id, code)
+        # Count code cells for progress reporting
+        code_cells = [
+            (i, cell) for i, cell in enumerate(nb.cells)
+            if cell.cell_type == "code" and cell.source.strip()
+        ]
+        total = len(code_cells)
+        errors: list[str] = []
 
-        errors = await _run_with_progress(
-            ctx, nb_manager.restore_notebook, nb_path, execute_fn
-        )
+        for done, (i, cell) in enumerate(code_cells):
+            await ctx.report_progress(progress=done, total=total)
+            await ctx.info(f"Restoring cell {done + 1}/{total}")
+            outputs = await _run_with_progress(
+                ctx, server.client.execute_code, kernel_id, cell.source
+            )
+            cell.outputs = nb_manager._convert_outputs(outputs)
+            for out in outputs:
+                if out.get("type") == "error":
+                    errors.append(
+                        f"Cell {i}: {out.get('ename', 'Error')}: "
+                        f"{out.get('evalue', '')}"
+                    )
+
+        await ctx.report_progress(progress=total, total=total)
+        nb_manager.save_notebook(nb_path, nb)
     except Exception:
         server.client.shutdown_kernel(kernel_id)
         raise
