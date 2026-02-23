@@ -296,9 +296,19 @@ async def start_session_resume_notebook(
         for done, (i, cell) in enumerate(code_cells):
             await ctx.report_progress(progress=done, total=total)
             await ctx.info(f"Restoring cell {done + 1}/{total}")
-            outputs = await _run_with_progress(
-                ctx, server.client.execute_code, kernel_id, cell.source
+            # Run execute_code in a thread, sending cell-level progress
+            # as keepalive (not elapsed time) so the display stays consistent.
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    server.client.execute_code, kernel_id, cell.source
+                )
             )
+            while not task.done():
+                finished, _ = await asyncio.wait({task}, timeout=15)
+                if finished:
+                    break
+                await ctx.report_progress(progress=done, total=total)
+            outputs = task.result()
             cell.outputs = nb_manager._convert_outputs(outputs)
             for out in outputs:
                 if out.get("type") == "error":
