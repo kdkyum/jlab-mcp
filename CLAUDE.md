@@ -65,3 +65,5 @@ Communication happens via:
 - Tools returning `Image` objects must use `@mcp.tool(output_schema=None)` and return `list` — otherwise FastMCP fails to serialize `Image` as `ImageContent`
 - `_sessions_lock` must guard all reads/writes to the `sessions` dict (thread safety for concurrent tool calls)
 - Kernel death (OOM, crash) is detected during WebSocket execution via `status: restarting/dead` messages and `WebSocketConnectionClosedException`
+- On user cancellation (ESC), `_execute_with_cancellation()` closes the cached WebSocket (unblocks background thread) and interrupts the kernel — do NOT add pre-execution `interrupt_kernel` calls (causes WS reconnection storms)
+- `_run_with_progress()` accepts `progress`/`total` kwargs: `total=0` (default) reports elapsed seconds, `total>0` reports caller-provided cell-level progress
