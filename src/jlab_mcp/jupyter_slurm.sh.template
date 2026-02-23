@@ -42,4 +42,8 @@ jupyter lab \
     --ServerApp.token="$JUPYTER_TOKEN" \
     --ServerApp.disable_check_xsrf=True \
     --ServerApp.allow_remote_access=True \
+    --ServerApp.shutdown_no_activity_timeout=0 \
+    --MappingKernelManager.cull_idle_timeout=0 \
+    --MappingKernelManager.cull_interval=300 \
+    --MappingKernelManager.cull_connected=True \
     --notebook-dir="{notebook_dir}"

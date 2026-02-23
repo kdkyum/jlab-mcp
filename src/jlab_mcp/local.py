@@ -39,6 +39,10 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
         f"--port={port}",
         f"--IdentityProvider.token={token}",
         "--no-browser",
+        "--ServerApp.shutdown_no_activity_timeout=0",
+        "--MappingKernelManager.cull_idle_timeout=0",
+        "--MappingKernelManager.cull_interval=300",
+        "--MappingKernelManager.cull_connected=True",
         f"--notebook-dir={config.NOTEBOOK_DIR}",
     ]
 
