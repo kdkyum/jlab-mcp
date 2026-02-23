@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -8,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 
 from jlab_mcp import config
@@ -209,6 +210,23 @@ def _get_session(session_id: str) -> Session:
         return sessions[session_id]
 
 
+async def _run_with_progress(ctx: Context, fn, *args):
+    """Run a blocking function in a thread, sending MCP progress every 15s.
+
+    This keeps the stdio pipe active so Claude Code doesn't consider
+    the MCP server dead during long-running kernel executions.
+    """
+    task = asyncio.create_task(asyncio.to_thread(fn, *args))
+    start = time.time()
+    while not task.done():
+        done, _ = await asyncio.wait({task}, timeout=15)
+        if done:
+            break
+        elapsed = int(time.time() - start)
+        await ctx.report_progress(progress=elapsed, total=0)
+    return task.result()
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
@@ -319,7 +337,7 @@ def start_session_continue_notebook(
 
 
 @mcp.tool(output_schema=None)
-def execute_code(session_id: str, code: str) -> list:
+async def execute_code(session_id: str, code: str, ctx: Context) -> list:
     """Execute code in the kernel and add cell to notebook.
 
     Args:
@@ -330,11 +348,9 @@ def execute_code(session_id: str, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    try:
-        session.jupyter_client.interrupt_kernel(session.kernel_id)
-    except Exception:
-        pass  # kernel may already be dead; execute_code will detect it
-    outputs = session.jupyter_client.execute_code(session.kernel_id, code)
+    outputs = await _run_with_progress(
+        ctx, session.jupyter_client.execute_code, session.kernel_id, code
+    )
     session.notebook_manager.add_code_cell(
         session.notebook_path, code, outputs
     )
@@ -342,7 +358,7 @@ def execute_code(session_id: str, code: str) -> list:
 
 
 @mcp.tool(output_schema=None)
-def edit_cell(session_id: str, cell_index: int, code: str) -> list:
+async def edit_cell(session_id: str, cell_index: int, code: str, ctx: Context) -> list:
     """Edit an existing cell, re-execute it, and update outputs.
 
     Args:
@@ -354,11 +370,9 @@ def edit_cell(session_id: str, cell_index: int, code: str) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    try:
-        session.jupyter_client.interrupt_kernel(session.kernel_id)
-    except Exception:
-        pass  # kernel may already be dead; execute_code will detect it
-    outputs = session.jupyter_client.execute_code(session.kernel_id, code)
+    outputs = await _run_with_progress(
+        ctx, session.jupyter_client.execute_code, session.kernel_id, code
+    )
     session.notebook_manager.edit_cell(
         session.notebook_path, cell_index, code, outputs
     )
@@ -587,7 +601,7 @@ print(json.dumps(result))
 
 
 @mcp.tool(output_schema=None)
-def execute_scratch(code: str) -> list:
+async def execute_scratch(code: str, ctx: Context) -> list:
     """Execute code on a temporary kernel for diagnostics (GPU status, etc.).
 
     Starts a throwaway kernel, runs the code, and shuts it down immediately.
@@ -603,7 +617,9 @@ def execute_scratch(code: str) -> list:
     kernel_id = server.client.start_kernel()
     time.sleep(2)
     try:
-        outputs = server.client.execute_code(kernel_id, code)
+        outputs = await _run_with_progress(
+            ctx, server.client.execute_code, kernel_id, code
+        )
         return _format_outputs(outputs)
     finally:
         try:

@@ -60,7 +60,7 @@ Communication happens via:
 - All SLURM settings (partition, GPU, modules, etc.) are configurable via `JLAB_MCP_*` env vars — see README.md
 - `server.py` validates notebook paths against `NOTEBOOK_DIR` to prevent path traversal
 - Connection files are created with `umask 077` and cleaned up on session shutdown
-- `execute_code`/`edit_cell` auto-interrupt the kernel before each execution (best-effort, to cancel stale runs from cancelled tool calls)
+- `execute_code`/`edit_cell`/`execute_scratch` are async and use `_run_with_progress()` to send MCP progress every 15s during long executions, keeping the stdio pipe alive
 - Tools returning `Image` objects must use `@mcp.tool(output_schema=None)` and return `list` — otherwise FastMCP fails to serialize `Image` as `ImageContent`
 - `_sessions_lock` must guard all reads/writes to the `sessions` dict (thread safety for concurrent tool calls)
 - Kernel death (OOM, crash) is detected during WebSocket execution via `status: restarting/dead` messages and `WebSocketConnectionClosedException`
