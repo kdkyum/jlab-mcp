@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import threading
 import time
 import uuid
 
@@ -26,6 +27,8 @@ class JupyterLabClient:
         self.token = token
         self.base_url = f"http://{self.host}:{self.port}"
         self._headers = {"Authorization": f"token {self.token}"}
+        self._ws_cache: dict[str, websocket.WebSocket] = {}
+        self._ws_lock = threading.Lock()
 
     def health_check(self) -> bool:
         """Check if JupyterLab is responding."""
@@ -51,7 +54,8 @@ class JupyterLabClient:
         return resp.json()["id"]
 
     def shutdown_kernel(self, kernel_id: str) -> None:
-        """Shutdown a kernel."""
+        """Shutdown a kernel and close its cached WebSocket."""
+        self._close_ws(kernel_id)
         requests.delete(
             f"{self.base_url}/api/kernels/{kernel_id}",
             headers=self._headers,
@@ -77,27 +81,79 @@ class JupyterLabClient:
         resp.raise_for_status()
         return resp.json()
 
+    def _get_ws(self, kernel_id: str) -> websocket.WebSocket:
+        """Get or create a cached WebSocket connection for a kernel."""
+        with self._ws_lock:
+            ws = self._ws_cache.get(kernel_id)
+            if ws is not None and ws.connected:
+                return ws
+            # Close stale connection if any
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            ws_url = (
+                f"ws://{self.host}:{self.port}"
+                f"/api/kernels/{kernel_id}/channels"
+                f"?token={self.token}"
+            )
+            ws = websocket.create_connection(ws_url, timeout=RECV_POLL_INTERVAL)
+            self._ws_cache[kernel_id] = ws
+            return ws
+
+    def _close_ws(self, kernel_id: str) -> None:
+        """Close and remove a cached WebSocket connection."""
+        with self._ws_lock:
+            ws = self._ws_cache.pop(kernel_id, None)
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
     def execute_code(
         self, kernel_id: str, code: str, timeout: int | None = None
     ) -> list[dict]:
         """Execute code via kernel WebSocket. Returns list of output dicts.
+
+        Reuses a cached WebSocket per kernel. If the connection is broken,
+        it reconnects automatically.
 
         Each output dict has:
           - type: "text" | "image" | "error"
           - content: str (text or base64 image data)
           - For errors: ename, evalue, traceback
         """
-        ws_url = (
-            f"ws://{self.host}:{self.port}"
-            f"/api/kernels/{kernel_id}/channels"
-            f"?token={self.token}"
-        )
-
-        ws = websocket.create_connection(ws_url, timeout=RECV_POLL_INTERVAL)
         try:
+            ws = self._get_ws(kernel_id)
             return self._execute_on_ws(ws, code, timeout)
-        finally:
-            ws.close()
+        except (
+            websocket.WebSocketConnectionClosedException,
+            ConnectionError,
+            OSError,
+        ):
+            # Connection was broken, close cached and retry once
+            self._close_ws(kernel_id)
+            try:
+                ws = self._get_ws(kernel_id)
+                return self._execute_on_ws(ws, code, timeout)
+            except (
+                websocket.WebSocketConnectionClosedException,
+                ConnectionError,
+                OSError,
+            ):
+                self._close_ws(kernel_id)
+                return [{
+                    "type": "error",
+                    "ename": "KernelDied",
+                    "evalue": (
+                        "Kernel died during execution (likely OOM or crash). "
+                        "All in-memory state is lost. "
+                        "Start a new session to continue."
+                    ),
+                    "traceback": [],
+                }]
 
     @staticmethod
     def _resize_png(png_base64: str) -> dict:
