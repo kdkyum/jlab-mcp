@@ -17,6 +17,28 @@ logger = logging.getLogger("jlab-mcp")
 # considered dead by Claude Code during long-running executions.
 RECV_POLL_INTERVAL = 30
 
+# Connection errors that indicate a broken WebSocket.
+_WS_CONNECTION_ERRORS = (
+    websocket.WebSocketConnectionClosedException,
+    ConnectionError,
+    OSError,
+)
+
+
+def _kernel_died_error(detail: str = "") -> dict:
+    """Build a standardised 'KernelDied' error output dict."""
+    reason = detail if detail else "likely OOM or crash"
+    return {
+        "type": "error",
+        "ename": "KernelDied",
+        "evalue": (
+            f"Kernel died during execution ({reason}). "
+            "All in-memory state is lost. "
+            "Start a new session to continue."
+        ),
+        "traceback": [],
+    }
+
 
 class JupyterLabClient:
     """HTTP + WebSocket client to JupyterLab on a compute node."""
@@ -118,42 +140,23 @@ class JupyterLabClient:
         """Execute code via kernel WebSocket. Returns list of output dicts.
 
         Reuses a cached WebSocket per kernel. If the connection is broken,
-        it reconnects automatically.
+        it reconnects once automatically.
 
         Each output dict has:
           - type: "text" | "image" | "error"
           - content: str (text or base64 image data)
           - For errors: ename, evalue, traceback
         """
-        try:
-            ws = self._get_ws(kernel_id)
-            return self._execute_on_ws(ws, code, timeout)
-        except (
-            websocket.WebSocketConnectionClosedException,
-            ConnectionError,
-            OSError,
-        ):
-            # Connection was broken, close cached and retry once
-            self._close_ws(kernel_id)
+        max_attempts = 2
+        for attempt in range(max_attempts):
             try:
                 ws = self._get_ws(kernel_id)
                 return self._execute_on_ws(ws, code, timeout)
-            except (
-                websocket.WebSocketConnectionClosedException,
-                ConnectionError,
-                OSError,
-            ):
+            except _WS_CONNECTION_ERRORS:
                 self._close_ws(kernel_id)
-                return [{
-                    "type": "error",
-                    "ename": "KernelDied",
-                    "evalue": (
-                        "Kernel died during execution (likely OOM or crash). "
-                        "All in-memory state is lost. "
-                        "Start a new session to continue."
-                    ),
-                    "traceback": [],
-                }]
+                if attempt < max_attempts - 1:
+                    continue
+                return [_kernel_died_error()]
 
     @staticmethod
     def _resize_png(png_base64: str) -> dict:
@@ -197,40 +200,23 @@ class JupyterLabClient:
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
-                # Check if caller-specified timeout exceeded
-                if timeout is not None:
-                    elapsed = time.time() - start_time
-                    if elapsed >= timeout:
-                        outputs.append({
-                            "type": "error",
-                            "ename": "ExecutionTimeout",
-                            "evalue": (
-                                f"Execution timed out after {timeout} seconds. "
-                                "The kernel is still running — use interrupt_kernel "
-                                "to cancel, or increase the timeout."
-                            ),
-                            "traceback": [],
-                        })
-                        break
-                # No timeout or not yet exceeded — keep waiting
                 elapsed = time.time() - start_time
+                if timeout is not None and elapsed >= timeout:
+                    outputs.append({
+                        "type": "error",
+                        "ename": "ExecutionTimeout",
+                        "evalue": (
+                            f"Execution timed out after {timeout} seconds. "
+                            "The kernel is still running — use interrupt_kernel "
+                            "to cancel, or increase the timeout."
+                        ),
+                        "traceback": [],
+                    })
+                    break
                 logger.debug("Waiting for kernel output (%.0fs elapsed)", elapsed)
                 continue
-            except (
-                websocket.WebSocketConnectionClosedException,
-                ConnectionError,
-                OSError,
-            ):
-                outputs.append({
-                    "type": "error",
-                    "ename": "KernelDied",
-                    "evalue": (
-                        "Kernel died during execution (likely OOM or crash). "
-                        "All in-memory state is lost. "
-                        "Start a new session to continue."
-                    ),
-                    "traceback": [],
-                })
+            except _WS_CONNECTION_ERRORS:
+                outputs.append(_kernel_died_error())
                 break
 
             msg = json.loads(raw)
@@ -244,17 +230,9 @@ class JupyterLabClient:
             if msg_type == "status":
                 exec_state = msg["content"].get("execution_state")
                 if exec_state in ("restarting", "dead"):
-                    outputs.append({
-                        "type": "error",
-                        "ename": "KernelDied",
-                        "evalue": (
-                            f"Kernel {exec_state} during execution "
-                            "(likely OOM or crash). "
-                            "All in-memory state is lost. "
-                            "Start a new session to continue."
-                        ),
-                        "traceback": [],
-                    })
+                    outputs.append(
+                        _kernel_died_error(f"kernel {exec_state}")
+                    )
                     break
 
             # Only process messages that are replies to our request

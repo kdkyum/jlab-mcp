@@ -210,15 +210,25 @@ def _get_session(session_id: str) -> Session:
         return sessions[session_id]
 
 
-async def _run_with_progress(ctx: Context, fn, *args):
+async def _run_with_progress(
+    ctx: Context,
+    fn,
+    *args,
+    progress: int = 0,
+    total: int = 0,
+):
     """Run a blocking function in a thread, sending MCP progress every 15s.
 
     This keeps the stdio pipe active so Claude Code doesn't consider
     the MCP server dead during long-running kernel executions.
 
     On cancellation (user presses ESC), the background thread is NOT
-    automatically stopped — callers must handle CancelledError and
+    automatically stopped -- callers must handle CancelledError and
     clean up (e.g. close WebSocket, interrupt kernel).
+
+    The *progress* and *total* parameters are forwarded to
+    ``ctx.report_progress`` so callers can report cell-level progress
+    instead of elapsed seconds.
     """
     task = asyncio.create_task(asyncio.to_thread(fn, *args))
     start = time.time()
@@ -227,8 +237,8 @@ async def _run_with_progress(ctx: Context, fn, *args):
             done, _ = await asyncio.wait({task}, timeout=15)
             if done:
                 break
-            elapsed = int(time.time() - start)
-            await ctx.report_progress(progress=elapsed, total=0)
+            report = int(time.time() - start) if total == 0 else progress
+            await ctx.report_progress(progress=report, total=total)
         return task.result()
     except asyncio.CancelledError:
         task.cancel()
@@ -246,6 +256,30 @@ def _interrupt_and_close_ws(client: JupyterLabClient, kernel_id: str) -> None:
         client.interrupt_kernel(kernel_id)
     except Exception:
         pass
+
+
+async def _execute_with_cancellation(
+    ctx: Context,
+    client: JupyterLabClient,
+    kernel_id: str,
+    code: str,
+    *,
+    progress: int = 0,
+    total: int = 0,
+) -> list[dict]:
+    """Execute code on a kernel, handling cancellation cleanly.
+
+    Wraps _run_with_progress and, on CancelledError, interrupts the
+    kernel and closes the WebSocket so the background thread unblocks.
+    """
+    try:
+        return await _run_with_progress(
+            ctx, client.execute_code, kernel_id, code,
+            progress=progress, total=total,
+        )
+    except asyncio.CancelledError:
+        _interrupt_and_close_ws(client, kernel_id)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -317,24 +351,10 @@ async def start_session_resume_notebook(
         for done, (i, cell) in enumerate(code_cells):
             await ctx.report_progress(progress=done, total=total)
             await ctx.info(f"Restoring cell {done + 1}/{total}")
-            # Run execute_code in a thread, sending cell-level progress
-            # as keepalive (not elapsed time) so the display stays consistent.
-            task = asyncio.create_task(
-                asyncio.to_thread(
-                    server.client.execute_code, kernel_id, cell.source
-                )
+            outputs = await _execute_with_cancellation(
+                ctx, server.client, kernel_id, cell.source,
+                progress=done, total=total,
             )
-            try:
-                while not task.done():
-                    finished, _ = await asyncio.wait({task}, timeout=15)
-                    if finished:
-                        break
-                    await ctx.report_progress(progress=done, total=total)
-            except asyncio.CancelledError:
-                task.cancel()
-                _interrupt_and_close_ws(server.client, kernel_id)
-                raise
-            outputs = task.result()
             cell.outputs = nb_manager._convert_outputs(outputs)
             for out in outputs:
                 if out.get("type") == "error":
@@ -407,13 +427,9 @@ async def execute_code(session_id: str, code: str, ctx: Context) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    try:
-        outputs = await _run_with_progress(
-            ctx, session.jupyter_client.execute_code, session.kernel_id, code
-        )
-    except asyncio.CancelledError:
-        _interrupt_and_close_ws(session.jupyter_client, session.kernel_id)
-        raise
+    outputs = await _execute_with_cancellation(
+        ctx, session.jupyter_client, session.kernel_id, code
+    )
     session.notebook_manager.add_code_cell(
         session.notebook_path, code, outputs
     )
@@ -433,13 +449,9 @@ async def edit_cell(session_id: str, cell_index: int, code: str, ctx: Context) -
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    try:
-        outputs = await _run_with_progress(
-            ctx, session.jupyter_client.execute_code, session.kernel_id, code
-        )
-    except asyncio.CancelledError:
-        _interrupt_and_close_ws(session.jupyter_client, session.kernel_id)
-        raise
+    outputs = await _execute_with_cancellation(
+        ctx, session.jupyter_client, session.kernel_id, code
+    )
     session.notebook_manager.edit_cell(
         session.notebook_path, cell_index, code, outputs
     )
@@ -684,13 +696,9 @@ async def execute_scratch(code: str, ctx: Context) -> list:
     kernel_id = server.client.start_kernel()
     time.sleep(2)
     try:
-        try:
-            outputs = await _run_with_progress(
-                ctx, server.client.execute_code, kernel_id, code
-            )
-        except asyncio.CancelledError:
-            server.client._close_ws(kernel_id)
-            raise
+        outputs = await _execute_with_cancellation(
+            ctx, server.client, kernel_id, code
+        )
         return _format_outputs(outputs)
     finally:
         try:
