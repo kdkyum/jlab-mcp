@@ -20,8 +20,8 @@ uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_im
 # Run a single test
 uv run python -m pytest tests/test_notebook.py::TestEditCell::test_edit_negative_index -v
 
-# Run integration tests (requires SLURM cluster with GPU partition)
-uv run python -m pytest tests/test_tools.py -v -s --timeout=300
+# Run integration tests (requires running `jlab-mcp start` first)
+uv run python -m pytest tests/test_tools.py -v -s --timeout=600
 ```
 
 ## Architecture
@@ -39,23 +39,28 @@ Communication happens via:
 
 ### Module Roles
 
-- **server.py** — FastMCP server with 7 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (job_id, kernel_id, JupyterLabClient, notebook_path, NotebookManager).
+- **server.py** — FastMCP server with 11 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (kernel_id, JupyterLabClient, notebook_path, NotebookManager). All access to `sessions` dict is guarded by `_sessions_lock`.
 - **slurm.py** — Renders SLURM template, runs `sbatch`/`squeue`/`scancel`, polls for job state and connection file. All SLURM output parsing is string-based (no `jq`).
 - **local.py** — Local mode: spawns `jupyter lab` as a subprocess, manages PID-based lifecycle.
 - **jupyter_client.py** — `JupyterLabClient` class: REST API calls (`requests`) for kernel management, WebSocket (`websocket-client`) for code execution. Collects outputs (text/image/error) until kernel goes idle.
 - **notebook.py** — `NotebookManager` class: creates/edits/saves `.ipynb` files with `nbformat`. Handles output conversion, cell ID generation, and notebook restoration (re-executing all cells).
 - **config.py** — All defaults overridable via `JLAB_MCP_*` environment variables. Directories auto-created on import.
 - **image_utils.py** — Resizes images >512px maintaining aspect ratio (Pillow). Gracefully returns original bytes on error.
+- **__main__.py** — CLI entry point: `jlab-mcp start [--debug]`, `stop`, `wait`, `status`, or MCP server (no args). Parses `JLAB_MCP_RUN_MODE` for SLURM vs local mode.
 
 ### Session Lifecycle
 
-`start_new_session` → submit sbatch → poll squeue until RUNNING → poll connection file → health check JupyterLab → start kernel → create notebook → return session_id. Shutdown reverses: stop kernel → scancel job.
+`start_new_session` → read status file → health check JupyterLab → start kernel → create notebook → return session_id. The MCP server does **not** manage SLURM — `jlab-mcp start` (run separately) handles job submission and writes the status file. Shutdown: stop kernel only (SLURM job stays alive).
 
 ## Key Constraints
 
 - `nbformat` v5+ requires cell IDs — `clean_notebook()` ensures they exist, never removes them
 - `torch` is installed separately via `uv pip install` (not in pyproject.toml dependencies)
-- The SLURM template at `templates/jupyter_slurm.sh.template` uses Python `.format()` placeholders (curly braces)
+- The SLURM template at `src/jlab_mcp/jupyter_slurm.sh.template` uses Python `.format()` placeholders (curly braces)
 - All SLURM settings (partition, GPU, modules, etc.) are configurable via `JLAB_MCP_*` env vars — see README.md
 - `server.py` validates notebook paths against `NOTEBOOK_DIR` to prevent path traversal
 - Connection files are created with `umask 077` and cleaned up on session shutdown
+- `execute_code`/`edit_cell` auto-interrupt the kernel before each execution (best-effort, to cancel stale runs from cancelled tool calls)
+- Tools returning `Image` objects must use `@mcp.tool(output_schema=None)` and return `list` — otherwise FastMCP fails to serialize `Image` as `ImageContent`
+- `_sessions_lock` must guard all reads/writes to the `sessions` dict (thread safety for concurrent tool calls)
+- Kernel death (OOM, crash) is detected during WebSocket execution via `status: restarting/dead` messages and `WebSocketConnectionClosedException`

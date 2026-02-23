@@ -461,13 +461,30 @@ def ping() -> dict:
     client = JupyterLabClient(hostname, int(port), token)
     healthy = client.health_check()
 
-    return {
+    result = {
         "status": "ok" if healthy else "unreachable",
         "hostname": hostname,
         "url": f"http://{hostname}:{port}",
         "healthy": healthy,
         "active_sessions": len(sessions),
     }
+
+    if healthy:
+        try:
+            kernels = client.list_kernels()
+            result["kernels"] = [
+                {
+                    "id": k["id"],
+                    "name": k.get("name", ""),
+                    "state": k.get("execution_state", "unknown"),
+                    "last_activity": k.get("last_activity", ""),
+                }
+                for k in kernels
+            ]
+        except Exception:
+            result["kernels"] = []
+
+    return result
 
 
 @mcp.tool()
