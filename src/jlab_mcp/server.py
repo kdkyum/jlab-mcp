@@ -330,7 +330,8 @@ async def start_session_resume_notebook(
         notebook_path: Path to existing notebook to resume.
 
     Returns:
-        Dict with session_id, notebook_path, job_id, hostname, errors.
+        Dict with session_id, notebook_path, job_id, hostname,
+        cells_executed count, and errors (if any).
     """
     nb_path = _validate_notebook_path(notebook_path)
     server = _get_or_start_server()
@@ -375,6 +376,7 @@ async def start_session_resume_notebook(
         "notebook_path": str(nb_path),
         "job_id": server.job_id,
         "hostname": server.hostname,
+        "cells_executed": total,
         "restored_with_errors": errors if errors else None,
     }
 
