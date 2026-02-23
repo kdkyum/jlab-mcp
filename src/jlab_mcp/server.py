@@ -263,8 +263,8 @@ def start_new_session(experiment_name: str) -> dict:
 
 
 @mcp.tool()
-def start_session_resume_notebook(
-    experiment_name: str, notebook_path: str
+async def start_session_resume_notebook(
+    experiment_name: str, notebook_path: str, ctx: Context
 ) -> dict:
     """Resume a notebook: re-execute all cells to restore kernel state.
 
@@ -285,7 +285,9 @@ def start_session_resume_notebook(
         def execute_fn(code: str) -> list[dict]:
             return server.client.execute_code(kernel_id, code)
 
-        errors = nb_manager.restore_notebook(nb_path, execute_fn)
+        errors = await _run_with_progress(
+            ctx, nb_manager.restore_notebook, nb_path, execute_fn
+        )
     except Exception:
         server.client.shutdown_kernel(kernel_id)
         raise
