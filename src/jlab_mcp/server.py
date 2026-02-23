@@ -317,21 +317,22 @@ def start_new_session(experiment_name: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def start_session_resume_notebook(
     experiment_name: str, notebook_path: str, ctx: Context
-) -> dict:
+) -> list:
     """Resume a notebook: re-execute all cells to restore kernel state.
 
     Reports per-cell progress so Claude Code can track restoration.
+    Returns session info followed by each cell's output (same format
+    as execute_code).
 
     Args:
         experiment_name: Name for this session.
         notebook_path: Path to existing notebook to resume.
 
     Returns:
-        Dict with session_id, notebook_path, job_id, hostname,
-        cells_executed count, and errors (if any).
+        List starting with session info dict, then per-cell outputs.
     """
     nb_path = _validate_notebook_path(notebook_path)
     server = _get_or_start_server()
@@ -347,7 +348,7 @@ async def start_session_resume_notebook(
             if cell.cell_type == "code" and cell.source.strip()
         ]
         total = len(code_cells)
-        errors: list[str] = []
+        all_parts: list = []
 
         for done, (i, cell) in enumerate(code_cells):
             await ctx.report_progress(progress=done, total=total)
@@ -357,12 +358,10 @@ async def start_session_resume_notebook(
                 progress=done, total=total,
             )
             cell.outputs = nb_manager._convert_outputs(outputs)
-            for out in outputs:
-                if out.get("type") == "error":
-                    errors.append(
-                        f"Cell {i}: {out.get('ename', 'Error')}: "
-                        f"{out.get('evalue', '')}"
-                    )
+            # Format this cell's outputs like execute_code does
+            cell_parts = _format_outputs(outputs)
+            all_parts.append(f"--- Cell {done + 1}/{total} ---")
+            all_parts.extend(cell_parts)
 
         await ctx.report_progress(progress=total, total=total)
         nb_manager.save_notebook(nb_path, nb)
@@ -371,14 +370,13 @@ async def start_session_resume_notebook(
         raise
 
     session = _register_session(kernel_id, server.client, nb_path, nb_manager)
-    return {
-        "session_id": session.session_id,
-        "notebook_path": str(nb_path),
-        "job_id": server.job_id,
-        "hostname": server.hostname,
-        "cells_executed": total,
-        "restored_with_errors": errors if errors else None,
-    }
+    result: list = [
+        f"Session {session.session_id} restored. "
+        f"{total} cells executed. "
+        f"Notebook: {nb_path}",
+    ]
+    result.extend(all_parts)
+    return result
 
 
 @mcp.tool()
