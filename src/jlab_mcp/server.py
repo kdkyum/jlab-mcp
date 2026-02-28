@@ -392,11 +392,15 @@ async def execute_code(
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
+    # Add cell to notebook first (visible during execution)
+    idx = session.notebook_manager.add_code_cell(
+        session.notebook_path, code, index=cell_index
+    )
     outputs = await _execute_with_cancellation(
         ctx, session.jupyter_client, session.kernel_id, code
     )
-    session.notebook_manager.add_code_cell(
-        session.notebook_path, code, outputs, index=cell_index
+    session.notebook_manager.update_cell_outputs(
+        session.notebook_path, idx, outputs
     )
     return _format_outputs(outputs)
 
