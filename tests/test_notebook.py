@@ -54,6 +54,38 @@ class TestAddCodeCell:
         nb = nb_manager.get_notebook(nb_path)
         assert len(nb.cells[0].outputs) == 1
 
+    def test_add_cell_at_beginning(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "second")
+        idx = nb_manager.add_code_cell(nb_path, "first", index=0)
+        assert idx == 0
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0].source == "first"
+        assert nb.cells[1].source == "second"
+
+    def test_add_cell_at_middle(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "a")
+        nb_manager.add_code_cell(nb_path, "c")
+        idx = nb_manager.add_code_cell(nb_path, "b", index=1)
+        assert idx == 1
+        nb = nb_manager.get_notebook(nb_path)
+        assert [c.source for c in nb.cells] == ["a", "b", "c"]
+
+    def test_add_cell_at_end_explicit(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "a")
+        idx = nb_manager.add_code_cell(nb_path, "b", index=1)
+        assert idx == 1
+        nb = nb_manager.get_notebook(nb_path)
+        assert [c.source for c in nb.cells] == ["a", "b"]
+
+    def test_add_cell_negative_index_rejected(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "a")
+        with pytest.raises(IndexError):
+            nb_manager.add_code_cell(nb_path, "bad", index=-2)
+
+    def test_add_cell_out_of_range(self, nb_manager, nb_path):
+        with pytest.raises(IndexError):
+            nb_manager.add_code_cell(nb_path, "bad", index=5)
+
 
 class TestAddMarkdownCell:
     def test_add_markdown(self, nb_manager, nb_path):
@@ -62,6 +94,18 @@ class TestAddMarkdownCell:
         nb = nb_manager.get_notebook(nb_path)
         assert nb.cells[0].cell_type == "markdown"
         assert nb.cells[0].source == "# Title\nSome text"
+
+    def test_add_markdown_at_index(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "code cell")
+        idx = nb_manager.add_markdown_cell(nb_path, "# Header", index=0)
+        assert idx == 0
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0].cell_type == "markdown"
+        assert nb.cells[1].cell_type == "code"
+
+    def test_add_markdown_negative_index_rejected(self, nb_manager, nb_path):
+        with pytest.raises(IndexError):
+            nb_manager.add_markdown_cell(nb_path, "bad", index=-2)
 
 
 class TestEditCell:
@@ -92,6 +136,76 @@ class TestEditCell:
         nb_manager.add_code_cell(nb_path, "only cell")
         with pytest.raises(IndexError):
             nb_manager.edit_cell(nb_path, 5, "bad index")
+
+
+class TestGetCellSource:
+    def test_get_by_index(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "cell_0")
+        nb_manager.add_code_cell(nb_path, "cell_1")
+        assert nb_manager.get_cell_source(nb_path, 0) == "cell_0"
+        assert nb_manager.get_cell_source(nb_path, 1) == "cell_1"
+
+    def test_get_negative_index(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "first")
+        nb_manager.add_code_cell(nb_path, "last")
+        assert nb_manager.get_cell_source(nb_path, -1) == "last"
+        assert nb_manager.get_cell_source(nb_path, -2) == "first"
+
+    def test_get_out_of_range(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "only")
+        with pytest.raises(IndexError):
+            nb_manager.get_cell_source(nb_path, 5)
+
+    def test_get_negative_out_of_range(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "only")
+        with pytest.raises(IndexError):
+            nb_manager.get_cell_source(nb_path, -3)
+
+
+class TestUpdateCellOutputs:
+    def test_updates_outputs_only(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "print('hi')")
+        outputs = [{"type": "text", "content": "hi\n"}]
+        resolved = nb_manager.update_cell_outputs(nb_path, 0, outputs)
+        assert resolved == 0
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0].source == "print('hi')"  # source unchanged
+        assert len(nb.cells[0].outputs) == 1
+
+    def test_updates_negative_index(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "a")
+        nb_manager.add_code_cell(nb_path, "b")
+        outputs = [{"type": "text", "content": "output\n"}]
+        resolved = nb_manager.update_cell_outputs(nb_path, -1, outputs)
+        assert resolved == 1
+        nb = nb_manager.get_notebook(nb_path)
+        assert len(nb.cells[1].outputs) == 1
+        assert len(nb.cells[0].outputs) == 0  # first cell untouched
+
+    def test_out_of_range(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "only")
+        with pytest.raises(IndexError):
+            nb_manager.update_cell_outputs(nb_path, 5, [])
+
+
+class TestGetCodeCells:
+    def test_returns_code_cells(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "x = 1")
+        nb_manager.add_markdown_cell(nb_path, "# Header")
+        nb_manager.add_code_cell(nb_path, "y = 2")
+        result = nb_manager.get_code_cells(nb_path)
+        assert len(result) == 2
+        assert result[0] == {"index": 0, "source": "x = 1"}
+        assert result[1] == {"index": 2, "source": "y = 2"}
+
+    def test_empty_notebook(self, nb_manager, nb_path):
+        result = nb_manager.get_code_cells(nb_path)
+        assert result == []
+
+    def test_skips_markdown(self, nb_manager, nb_path):
+        nb_manager.add_markdown_cell(nb_path, "# Only markdown")
+        result = nb_manager.get_code_cells(nb_path)
+        assert result == []
 
 
 class TestCleanNotebook:

@@ -331,12 +331,13 @@ def start_notebook(notebook_path: str) -> dict:
         notebook_path: Path to existing notebook.
 
     Returns:
-        Dict with session_id, notebook_path, job_id, hostname.
+        Dict with session_id, notebook_path, job_id, hostname, cells.
     """
     nb_path = _validate_notebook_path(notebook_path)
     server = _get_or_start_server()
 
     # Check for an existing session on this notebook with a live kernel
+    existing = None
     with _sessions_lock:
         for session in sessions.values():
             if session.notebook_path == nb_path:
@@ -344,12 +345,17 @@ def start_notebook(notebook_path: str) -> dict:
                     k["id"] for k in server.client.list_kernels()
                 }
                 if session.kernel_id in live_ids:
-                    return {
-                        "session_id": session.session_id,
-                        "notebook_path": str(nb_path),
-                        "job_id": server.job_id,
-                        "hostname": server.hostname,
-                    }
+                    existing = session
+                    break
+
+    if existing is not None:
+        return {
+            "session_id": existing.session_id,
+            "notebook_path": str(nb_path),
+            "job_id": server.job_id,
+            "hostname": server.hostname,
+            "cells": existing.notebook_manager.get_code_cells(nb_path),
+        }
 
     # No live session — start a fresh kernel
     kernel_id = _start_kernel(server)
@@ -367,16 +373,20 @@ def start_notebook(notebook_path: str) -> dict:
         "notebook_path": str(nb_path),
         "job_id": server.job_id,
         "hostname": server.hostname,
+        "cells": nb_manager.get_code_cells(nb_path),
     }
 
 
 @mcp.tool(output_schema=None)
-async def execute_code(session_id: str, code: str, ctx: Context) -> list:
-    """Execute code in the kernel and add cell to notebook.
+async def execute_code(
+    session_id: str, code: str, cell_index: int = -1, *, ctx: Context
+) -> list:
+    """Insert a new code cell and execute it.
 
     Args:
         session_id: Session identifier.
         code: Python code to execute.
+        cell_index: Position to insert the cell. -1 = append (default).
 
     Returns:
         List of text strings and Image objects.
@@ -386,14 +396,17 @@ async def execute_code(session_id: str, code: str, ctx: Context) -> list:
         ctx, session.jupyter_client, session.kernel_id, code
     )
     session.notebook_manager.add_code_cell(
-        session.notebook_path, code, outputs
+        session.notebook_path, code, outputs, index=cell_index
     )
     return _format_outputs(outputs)
 
 
-@mcp.tool(output_schema=None)
-async def edit_cell(session_id: str, cell_index: int, code: str, ctx: Context) -> list:
-    """Edit an existing cell, re-execute it, and update outputs.
+@mcp.tool()
+def edit_cell(session_id: str, cell_index: int, code: str) -> str:
+    """Edit an existing cell's source code (no execution).
+
+    Updates the cell source and clears stale outputs.
+    Use run_cell afterwards to execute the updated cell.
 
     Args:
         session_id: Session identifier.
@@ -401,32 +414,57 @@ async def edit_cell(session_id: str, cell_index: int, code: str, ctx: Context) -
         code: New code for the cell.
 
     Returns:
+        Confirmation string.
+    """
+    session = _get_session(session_id)
+    resolved = session.notebook_manager.edit_cell(
+        session.notebook_path, cell_index, code, outputs=[]
+    )
+    return f"Cell {resolved} updated (not executed)"
+
+
+@mcp.tool(output_schema=None)
+async def run_cell(session_id: str, cell_index: int, ctx: Context) -> list:
+    """Run an existing cell without modifying its source.
+
+    Reads the cell source, executes it on the kernel, and updates
+    the cell outputs in the notebook.
+
+    Args:
+        session_id: Session identifier.
+        cell_index: Cell index (supports negative indexing).
+
+    Returns:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
-    outputs = await _execute_with_cancellation(
-        ctx, session.jupyter_client, session.kernel_id, code
+    source = session.notebook_manager.get_cell_source(
+        session.notebook_path, cell_index
     )
-    session.notebook_manager.edit_cell(
-        session.notebook_path, cell_index, code, outputs
+    outputs = await _execute_with_cancellation(
+        ctx, session.jupyter_client, session.kernel_id, source
+    )
+    session.notebook_manager.update_cell_outputs(
+        session.notebook_path, cell_index, outputs
     )
     return _format_outputs(outputs)
 
 
 @mcp.tool()
-def add_markdown(session_id: str, markdown: str) -> str:
+def add_markdown(session_id: str, markdown: str, cell_index: int = -1) -> str:
     """Add a markdown cell to the notebook.
 
     Args:
         session_id: Session identifier.
         markdown: Markdown content.
+        cell_index: Position to insert. -1 = append (default).
 
     Returns:
         Confirmation with cell index.
     """
     session = _get_session(session_id)
     cell_idx = session.notebook_manager.add_markdown_cell(
-        session.notebook_path, markdown
+        session.notebook_path, markdown, index=cell_index
     )
     return f"Added markdown cell at index {cell_idx}"
 

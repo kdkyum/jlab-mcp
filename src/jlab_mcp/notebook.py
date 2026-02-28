@@ -26,6 +26,32 @@ def _sanitize_filename(name: str) -> str:
 class NotebookManager:
     """Manages notebook state using nbformat."""
 
+    @staticmethod
+    def _resolve_cell_index(nb: nbformat.NotebookNode, cell_index: int) -> int:
+        """Resolve a cell index (with negative indexing) and bounds-check."""
+        if cell_index < 0:
+            cell_index = len(nb.cells) + cell_index
+        if cell_index < 0 or cell_index >= len(nb.cells):
+            raise IndexError(
+                f"Cell index {cell_index} out of range "
+                f"(notebook has {len(nb.cells)} cells)"
+            )
+        return cell_index
+
+    @staticmethod
+    def _insert_cell(nb: nbformat.NotebookNode, cell, index: int) -> int:
+        """Insert a cell at index. -1 = append, other negatives raise IndexError."""
+        if index == -1:
+            nb.cells.append(cell)
+            return len(nb.cells) - 1
+        if index < 0 or index > len(nb.cells):
+            raise IndexError(
+                f"Insert index {index} out of range "
+                f"(notebook has {len(nb.cells)} cells)"
+            )
+        nb.cells.insert(index, cell)
+        return index
+
     def create_notebook(self, name: str, directory: str | Path) -> Path:
         """Create an empty .ipynb notebook. Returns the path."""
         name = _sanitize_filename(name)
@@ -51,24 +77,40 @@ class NotebookManager:
         return nb_path
 
     def add_code_cell(
-        self, nb_path: Path | str, code: str, outputs: list[dict] | None = None
+        self,
+        nb_path: Path | str,
+        code: str,
+        outputs: list[dict] | None = None,
+        index: int = -1,
     ) -> int:
-        """Append a code cell. Returns the cell index."""
+        """Add a code cell. Returns the cell index.
+
+        Args:
+            index: Position to insert. -1 = append (default).
+                   0..len = insert at position. Other negatives raise IndexError.
+        """
         nb = self.get_notebook(nb_path)
         cell = new_code_cell(source=code)
         if outputs:
             cell.outputs = self._convert_outputs(outputs)
-        nb.cells.append(cell)
+        idx = self._insert_cell(nb, cell, index)
         self.save_notebook(nb_path, nb)
-        return len(nb.cells) - 1
+        return idx
 
-    def add_markdown_cell(self, nb_path: Path | str, markdown: str) -> int:
-        """Append a markdown cell. Returns the cell index."""
+    def add_markdown_cell(
+        self, nb_path: Path | str, markdown: str, index: int = -1
+    ) -> int:
+        """Add a markdown cell. Returns the cell index.
+
+        Args:
+            index: Position to insert. -1 = append (default).
+                   0..len = insert at position. Other negatives raise IndexError.
+        """
         nb = self.get_notebook(nb_path)
         cell = new_markdown_cell(source=markdown)
-        nb.cells.append(cell)
+        idx = self._insert_cell(nb, cell, index)
         self.save_notebook(nb_path, nb)
-        return len(nb.cells) - 1
+        return idx
 
     def edit_cell(
         self,
@@ -79,19 +121,42 @@ class NotebookManager:
     ) -> int:
         """Replace cell content and outputs. Returns the resolved cell index."""
         nb = self.get_notebook(nb_path)
-        # Support negative indexing
-        if cell_index < 0:
-            cell_index = len(nb.cells) + cell_index
-        if cell_index < 0 or cell_index >= len(nb.cells):
-            raise IndexError(
-                f"Cell index {cell_index} out of range "
-                f"(notebook has {len(nb.cells)} cells)"
-            )
+        cell_index = self._resolve_cell_index(nb, cell_index)
         nb.cells[cell_index].source = new_code
         if outputs is not None:
             nb.cells[cell_index].outputs = self._convert_outputs(outputs)
         self.save_notebook(nb_path, nb)
         return cell_index
+
+    def get_cell_source(self, nb_path: Path | str, cell_index: int) -> str:
+        """Read cell source by index. Supports negative indexing."""
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        return nb.cells[cell_index].source
+
+    def update_cell_outputs(
+        self, nb_path: Path | str, cell_index: int, outputs: list[dict]
+    ) -> int:
+        """Update only the outputs of a cell (source unchanged). Returns resolved index."""
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        nb.cells[cell_index].outputs = self._convert_outputs(outputs)
+        self.save_notebook(nb_path, nb)
+        return cell_index
+
+    def get_code_cells(self, nb_path: Path | str) -> list[dict]:
+        """Return info for all code cells.
+
+        Returns:
+            List of dicts: [{"index": i, "source": ...}, ...]
+            The index is the absolute notebook cell index (including markdown cells).
+        """
+        nb = self.get_notebook(nb_path)
+        return [
+            {"index": i, "source": cell.source}
+            for i, cell in enumerate(nb.cells)
+            if cell.cell_type == "code"
+        ]
 
     def get_notebook(self, nb_path: Path | str) -> nbformat.NotebookNode:
         """Read a notebook from disk."""

@@ -20,6 +20,7 @@ from jlab_mcp.server import (
     add_markdown as _add_markdown,
     edit_cell as _edit_cell,
     execute_code as _execute_code,
+    run_cell as _run_cell,
     sessions,
     shutdown_session as _shutdown_session,
     start_new_notebook as _start_new_notebook,
@@ -33,6 +34,7 @@ start_new_notebook = _start_new_notebook.fn
 start_notebook = _start_notebook.fn
 execute_code = _execute_code.fn
 edit_cell = _edit_cell.fn
+run_cell = _run_cell.fn
 add_markdown = _add_markdown.fn
 shutdown_session = _shutdown_session.fn
 
@@ -148,26 +150,46 @@ class TestExecuteCode:
 
 
 class TestEditCell:
-    def test_edit_cell(self, session):
+    def test_edit_cell_no_execution(self, session):
+        """edit_cell updates source and clears outputs, does not execute."""
         execute_code(session_id=session["session_id"], code="y_edit = 10")
         result = edit_cell(
             session_id=session["session_id"],
             cell_index=-1,
             code="y_edit = 20\nprint(y_edit)",
         )
-        text = "".join(str(item) for item in result)
-        assert "20" in text
+        assert "updated" in result.lower()
+        assert "not executed" in result.lower()
 
-    def test_edit_cell_negative_index(self, session):
-        execute_code(session_id=session["session_id"], code="a_neg = 1")
-        execute_code(session_id=session["session_id"], code="b_neg = 2")
-        result = edit_cell(
+    def test_edit_then_run(self, session):
+        """edit_cell + run_cell produces correct output."""
+        execute_code(session_id=session["session_id"], code="placeholder = 1")
+        edit_cell(
             session_id=session["session_id"],
-            cell_index=-2,
-            code="a_neg = 100\nprint(a_neg)",
+            cell_index=-1,
+            code="placeholder = 99\nprint(placeholder)",
         )
+        result = run_cell(session_id=session["session_id"], cell_index=-1)
         text = "".join(str(item) for item in result)
-        assert "100" in text
+        assert "99" in text
+
+
+class TestRunCell:
+    def test_run_existing_cell(self, session):
+        """run_cell executes an existing cell without modifying source."""
+        execute_code(
+            session_id=session["session_id"], code="print('run_cell_test')"
+        )
+        result = run_cell(session_id=session["session_id"], cell_index=-1)
+        text = "".join(str(item) for item in result)
+        assert "run_cell_test" in text
+
+    def test_run_cell_negative_index(self, session):
+        execute_code(session_id=session["session_id"], code="rc_a = 1")
+        execute_code(session_id=session["session_id"], code="print('rc_last')")
+        result = run_cell(session_id=session["session_id"], cell_index=-1)
+        text = "".join(str(item) for item in result)
+        assert "rc_last" in text
 
 
 class TestAddMarkdown:
@@ -177,6 +199,25 @@ class TestAddMarkdown:
             markdown="# Test Section\nThis is a test.",
         )
         assert "cell" in result.lower()
+
+
+class TestExecuteCodeCellIndex:
+    def test_insert_at_beginning(self, session):
+        """execute_code with cell_index=0 inserts at the beginning."""
+        from jlab_mcp.notebook import NotebookManager
+
+        nb_path = session["notebook_path"]
+        nb_manager = NotebookManager()
+
+        count_before = nb_manager.get_cell_count(nb_path)
+        execute_code(
+            session_id=session["session_id"],
+            code="print('inserted_first')",
+            cell_index=0,
+        )
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0].source == "print('inserted_first')"
+        assert nb_manager.get_cell_count(nb_path) == count_before + 1
 
 
 class TestStartNotebook:
@@ -203,6 +244,25 @@ class TestStartNotebook:
             )
             text = "".join(str(item) for item in result)
             assert "NameError" in text
+        finally:
+            shutdown_session(session_id=s2["session_id"])
+
+    def test_returns_cells(self):
+        """start_notebook returns code cells in the response."""
+        s1 = start_new_notebook(experiment_name="test_cells_return")
+        execute_code(session_id=s1["session_id"], code="x = 1")
+        execute_code(session_id=s1["session_id"], code="y = 2")
+        nb_path = s1["notebook_path"]
+        shutdown_session(session_id=s1["session_id"])
+
+        s2 = start_notebook(notebook_path=nb_path)
+        try:
+            assert "cells" in s2
+            cells = s2["cells"]
+            assert len(cells) >= 2
+            sources = [c["source"] for c in cells]
+            assert "x = 1" in sources
+            assert "y = 2" in sources
         finally:
             shutdown_session(session_id=s2["session_id"])
 
