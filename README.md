@@ -147,10 +147,11 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 | Tool | Description |
 |---|---|
 | `start_new_notebook` | Start kernel on shared server, create empty notebook |
-| `start_notebook` | Attach fresh kernel to existing notebook (no re-execution) |
-| `execute_code` | Run Python code, append cell to notebook (returns text + images) |
-| `edit_cell` | Edit and re-execute a cell (supports negative indexing) |
-| `add_markdown` | Add markdown cell to notebook |
+| `start_notebook` | Attach fresh kernel to existing notebook, returns cell contents |
+| `execute_code` | Insert new code cell and execute it (supports positional insertion) |
+| `edit_cell` | Edit cell source only, no execution (clears stale outputs) |
+| `run_cell` | Run existing cell without modifying its source |
+| `add_markdown` | Add markdown cell to notebook (supports positional insertion) |
 | `execute_scratch` | Run code on a utility kernel (no notebook save, no session state) |
 | `interrupt_kernel` | Interrupt running execution without shutting down the session |
 | `shutdown_session` | Stop kernel (SLURM job stays alive for other sessions) |

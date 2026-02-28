@@ -144,7 +144,7 @@ The MCP server reads this same status file to connect, regardless of mode.
 
 ## 2. MCP Server Connects
 
-When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 10 tools + 1 resource.
+When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 11 tools + 1 resource.
 
 The MCP server **does not manage SLURM** — it only reads the status file written by `jlab-mcp start` to find the running JupyterLab.
 
@@ -195,15 +195,9 @@ start_new_notebook(experiment_name="my_experiment")
 execute_code(session_id="031ec533", code="import torch; print(torch.cuda.get_device_name(0))")
 ```
 
-### 4a. Auto-interrupt Previous Execution
+This inserts a new code cell and executes it. The optional `cell_index` parameter controls where the cell is inserted (`-1` = append, default).
 
-Before sending new code, the kernel is interrupted to cancel any still-running execution from a previously cancelled tool call. This is a no-op on an idle kernel.
-
-```python
-requests.post("http://ravg1011:18432/api/kernels/kernel-uuid-1234/interrupt")
-```
-
-### 4b. Open WebSocket to Kernel
+### 4a. Open WebSocket to Kernel
 
 ```python
 ws = websocket.create_connection(
@@ -211,7 +205,7 @@ ws = websocket.create_connection(
 )
 ```
 
-### 4c. Send `execute_request` (Jupyter Message Protocol)
+### 4b. Send `execute_request` (Jupyter Message Protocol)
 
 ```python
 ws.send(json.dumps({
@@ -221,7 +215,7 @@ ws.send(json.dumps({
 }))
 ```
 
-### 4d. Receive Messages Until Kernel Goes Idle
+### 4c. Receive Messages Until Kernel Goes Idle
 
 ```
 <- {"msg_type": "stream",  "content": {"text": "NVIDIA A100-SXM4-80GB"}}  # stdout
@@ -254,15 +248,21 @@ All in-memory state is lost. Start a new session to continue.
 
 Without this detection, a kernel death would cause the WebSocket loop to hang silently for up to 300 seconds (the execution timeout), leaving Claude Code with no feedback.
 
-### 4e. Process Outputs
+### 4d. Process Outputs
 
 - **Text** -> returned as string in a list
 - **Images** -> decoded, resized to 512px max, returned as FastMCP `Image` object -> becomes MCP `ImageContent` -> **Claude Code sees the actual plot**
 - **Errors** -> traceback returned as string in a list
 
-### 4f. Save to Notebook
+### 4e. Save to Notebook
 
-The code and outputs are appended as a cell to `my_experiment.ipynb` on the shared filesystem.
+The code and outputs are saved as a cell to `my_experiment.ipynb` on the shared filesystem (appended by default, or inserted at `cell_index` if specified).
+
+### Other Cell Operations
+
+- **`edit_cell`** — Updates cell source without executing. Clears stale outputs. Use `run_cell` afterward to execute.
+- **`run_cell`** — Reads the source of an existing cell, executes it on the kernel, and updates the cell outputs (source unchanged).
+- **`start_notebook`** — Returns code cell contents in the response so Claude has full notebook context without re-reading.
 
 ## 5. Shutdown and Cleanup
 
