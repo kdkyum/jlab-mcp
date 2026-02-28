@@ -144,7 +144,7 @@ The MCP server reads this same status file to connect, regardless of mode.
 
 ## 2. MCP Server Connects
 
-When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 11 tools + 1 resource.
+When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 10 tools + 1 resource.
 
 The MCP server **does not manage SLURM** — it only reads the status file written by `jlab-mcp start` to find the running JupyterLab.
 
@@ -174,10 +174,10 @@ check_resources()
 
 This uses a **throwaway kernel** (like `execute_scratch`) so it doesn't pollute your session's namespace. It reads `/proc/meminfo` for memory, `os.getloadavg()` for CPU, and `nvidia-smi` for GPU. No session required — only needs a running JupyterLab server.
 
-## 3. Claude Calls `start_new_session`
+## 3. Claude Calls `start_new_notebook`
 
 ```
-start_new_session(experiment_name="my_experiment")
+start_new_notebook(experiment_name="my_experiment")
 ```
 
 1. `_get_or_start_server()` reads the status file and connects to JupyterLab
@@ -332,7 +332,7 @@ claude (starts Claude Code)
 MCP Server starts
   | reads server-status
   |
-  |-- Claude calls start_new_session
+  |-- Claude calls start_new_notebook
   |   POST /api/kernels -----------------------------------------------> kernel-1 started
   |   create notebook.ipynb
   |
@@ -381,7 +381,7 @@ claude (starts Claude Code)
 MCP Server starts
   | reads server-status (same format, MODE=local)
   |
-  |-- Claude calls start_new_session
+  |-- Claude calls start_new_notebook
   |   POST /api/kernels ----------------> kernel-1 started
   |   create notebook.ipynb
   |

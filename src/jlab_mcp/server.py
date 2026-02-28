@@ -287,7 +287,7 @@ async def _execute_with_cancellation(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def start_new_session(experiment_name: str) -> dict:
+def start_new_notebook(experiment_name: str) -> dict:
     """Start a new session: start kernel, create notebook.
 
     Uses the shared JupyterLab server (must be started with `jlab-mcp start`).
@@ -317,99 +317,54 @@ def start_new_session(experiment_name: str) -> dict:
     }
 
 
-@mcp.tool(output_schema=None)
-async def start_session_resume_notebook(
-    experiment_name: str, notebook_path: str, ctx: Context
-) -> list:
-    """Resume a notebook: re-execute all cells to restore kernel state.
+@mcp.tool()
+def start_notebook(notebook_path: str) -> dict:
+    """Open an existing notebook, reusing the kernel if still alive.
 
-    Reports per-cell progress so Claude Code can track restoration.
-    Returns session info followed by each cell's output (same format
-    as execute_code).
+    If a session already exists for this notebook and its kernel is
+    still running, returns that session (all state preserved).
+    Otherwise starts a fresh kernel (no previous state).
+
+    Use shutdown_session + start_notebook to force a kernel restart.
 
     Args:
-        experiment_name: Name for this session.
-        notebook_path: Path to existing notebook to resume.
+        notebook_path: Path to existing notebook.
 
     Returns:
-        List starting with session info dict, then per-cell outputs.
+        Dict with session_id, notebook_path, job_id, hostname.
     """
     nb_path = _validate_notebook_path(notebook_path)
     server = _get_or_start_server()
+
+    # Check for an existing session on this notebook with a live kernel
+    with _sessions_lock:
+        for session in sessions.values():
+            if session.notebook_path == nb_path:
+                live_ids = {
+                    k["id"] for k in server.client.list_kernels()
+                }
+                if session.kernel_id in live_ids:
+                    return {
+                        "session_id": session.session_id,
+                        "notebook_path": str(nb_path),
+                        "job_id": server.job_id,
+                        "hostname": server.hostname,
+                    }
+
+    # No live session — start a fresh kernel
     kernel_id = _start_kernel(server)
 
     try:
         nb_manager = NotebookManager()
-        nb = nb_manager.get_notebook(nb_path)
-
-        # Count code cells for progress reporting
-        code_cells = [
-            (i, cell) for i, cell in enumerate(nb.cells)
-            if cell.cell_type == "code" and cell.source.strip()
-        ]
-        total = len(code_cells)
-        all_parts: list = []
-
-        for done, (i, cell) in enumerate(code_cells):
-            await ctx.report_progress(progress=done, total=total)
-            await ctx.info(f"Restoring cell {done + 1}/{total}")
-            outputs = await _execute_with_cancellation(
-                ctx, server.client, kernel_id, cell.source,
-                progress=done, total=total,
-            )
-            cell.outputs = nb_manager._convert_outputs(outputs)
-            # Format this cell's outputs like execute_code does
-            cell_parts = _format_outputs(outputs)
-            all_parts.append(f"--- Cell {done + 1}/{total} ---")
-            all_parts.extend(cell_parts)
-
-        await ctx.report_progress(progress=total, total=total)
-        nb_manager.save_notebook(nb_path, nb)
+        nb_manager.get_notebook(nb_path)  # validate it's a real notebook
     except Exception:
         server.client.shutdown_kernel(kernel_id)
         raise
 
     session = _register_session(kernel_id, server.client, nb_path, nb_manager)
-    result: list = [
-        f"Session {session.session_id} restored. "
-        f"{total} cells executed. "
-        f"Notebook: {nb_path}",
-    ]
-    result.extend(all_parts)
-    return result
-
-
-@mcp.tool()
-def start_session_continue_notebook(
-    experiment_name: str, notebook_path: str
-) -> dict:
-    """Continue a notebook: fork it with fresh kernel (no re-execution).
-
-    Args:
-        experiment_name: Name for this session.
-        notebook_path: Path to existing notebook to fork.
-
-    Returns:
-        Dict with session_id, notebook_path (forked), job_id, hostname.
-    """
-    nb_path = _validate_notebook_path(notebook_path)
-    server = _get_or_start_server()
-    kernel_id = _start_kernel(server)
-
-    try:
-        nb_manager = NotebookManager()
-        forked_path = nb_manager.copy_notebook(nb_path, suffix="_continued")
-    except Exception:
-        server.client.shutdown_kernel(kernel_id)
-        raise
-
-    session = _register_session(
-        kernel_id, server.client, forked_path, nb_manager
-    )
     return {
         "session_id": session.session_id,
-        "notebook_path": str(forked_path),
-        "original_notebook": str(nb_path),
+        "notebook_path": str(nb_path),
         "job_id": server.job_id,
         "hostname": server.hostname,
     }

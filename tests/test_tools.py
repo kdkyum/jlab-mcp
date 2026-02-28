@@ -22,17 +22,15 @@ from jlab_mcp.server import (
     execute_code as _execute_code,
     sessions,
     shutdown_session as _shutdown_session,
-    start_new_session as _start_new_session,
-    start_session_continue_notebook as _start_session_continue_notebook,
-    start_session_resume_notebook as _start_session_resume_notebook,
+    start_new_notebook as _start_new_notebook,
+    start_notebook as _start_notebook,
 )
 from jlab_mcp.slurm import get_job_state
 
 # FastMCP @mcp.tool() wraps functions into FunctionTool objects.
 # Access the underlying callable via .fn
-start_new_session = _start_new_session.fn
-start_session_resume_notebook = _start_session_resume_notebook.fn
-start_session_continue_notebook = _start_session_continue_notebook.fn
+start_new_notebook = _start_new_notebook.fn
+start_notebook = _start_notebook.fn
 execute_code = _execute_code.fn
 edit_cell = _edit_cell.fn
 add_markdown = _add_markdown.fn
@@ -42,7 +40,7 @@ shutdown_session = _shutdown_session.fn
 @pytest.fixture(scope="module")
 def session():
     """Create a shared session for most tests. Cleaned up at end."""
-    result = start_new_session(experiment_name="test_integration")
+    result = start_new_notebook(experiment_name="test_integration")
     yield result
     # Cleanup
     try:
@@ -58,7 +56,7 @@ def cleanup_kernels_after():
     _cleanup_kernels()
 
 
-class TestStartNewSession:
+class TestStartNewNotebook:
     def test_returns_required_fields(self, session):
         assert "session_id" in session
         assert "notebook_path" in session
@@ -181,45 +179,24 @@ class TestAddMarkdown:
         assert "cell" in result.lower()
 
 
-class TestResumeNotebook:
-    def test_resume_restores_state(self):
-        # Create session with state
-        s1 = start_new_session(experiment_name="test_resume")
-        execute_code(session_id=s1["session_id"], code="resume_var = 'hello'")
+class TestStartNotebook:
+    def test_attaches_to_existing_notebook(self):
+        """start_notebook opens an existing notebook with a fresh kernel."""
+        s1 = start_new_notebook(experiment_name="test_start_nb")
+        execute_code(session_id=s1["session_id"], code="start_nb_var = 99")
         nb_path = s1["notebook_path"]
         shutdown_session(session_id=s1["session_id"])
 
-        # Resume — reuses the same SLURM job, new kernel
-        s2 = start_session_resume_notebook(
-            experiment_name="test_resume_2", notebook_path=nb_path
-        )
+        s2 = start_notebook(notebook_path=nb_path)
         try:
-            result = execute_code(
-                session_id=s2["session_id"], code="print(resume_var)"
-            )
-            text = "".join(str(item) for item in result)
-            assert "hello" in text
-        finally:
-            shutdown_session(session_id=s2["session_id"])
-
-
-class TestContinueNotebook:
-    def test_continue_forks_notebook(self):
-        s1 = start_new_session(experiment_name="test_continue")
-        execute_code(session_id=s1["session_id"], code="cont_var = 99")
-        nb_path = s1["notebook_path"]
-        shutdown_session(session_id=s1["session_id"])
-
-        s2 = start_session_continue_notebook(
-            experiment_name="test_continue_2", notebook_path=nb_path
-        )
-        try:
-            assert "_continued" in s2["notebook_path"]
+            # Same notebook path, no fork
+            assert s2["notebook_path"] == nb_path
+            # Fresh kernel — old variables are NOT available
             result = execute_code(
                 session_id=s2["session_id"],
                 code=(
                     "try:\n"
-                    "    print(cont_var)\n"
+                    "    print(start_nb_var)\n"
                     "except NameError:\n"
                     "    print('NameError: variable not defined')"
                 ),
@@ -233,7 +210,7 @@ class TestContinueNotebook:
 class TestShutdownSession:
     def test_shutdown_only_kills_kernel(self):
         """Shutdown session kills the kernel but keeps the SLURM job alive."""
-        s = start_new_session(experiment_name="test_shutdown")
+        s = start_new_notebook(experiment_name="test_shutdown")
         job_id = s["job_id"]
         result = shutdown_session(session_id=s["session_id"])
         assert "shutdown" in result.lower()
@@ -247,8 +224,8 @@ class TestShutdownSession:
 class TestSharedServer:
     def test_multiple_sessions_same_job(self):
         """Multiple sessions share the same SLURM job."""
-        s1 = start_new_session(experiment_name="test_shared_1")
-        s2 = start_new_session(experiment_name="test_shared_2")
+        s1 = start_new_notebook(experiment_name="test_shared_1")
+        s2 = start_new_notebook(experiment_name="test_shared_2")
         try:
             assert s1["job_id"] == s2["job_id"]
             assert s1["hostname"] == s2["hostname"]

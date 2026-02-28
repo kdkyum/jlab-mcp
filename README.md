@@ -146,9 +146,8 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 
 | Tool | Description |
 |---|---|
-| `start_new_session` | Start kernel on shared server, create empty notebook |
-| `start_session_resume_notebook` | Resume existing notebook (re-executes all cells to restore state) |
-| `start_session_continue_notebook` | Fork notebook with fresh kernel (no re-execution) |
+| `start_new_notebook` | Start kernel on shared server, create empty notebook |
+| `start_notebook` | Attach fresh kernel to existing notebook (no re-execution) |
 | `execute_code` | Run Python code, append cell to notebook (returns text + images) |
 | `edit_cell` | Edit and re-execute a cell (supports negative indexing) |
 | `add_markdown` | Add markdown cell to notebook |
@@ -162,7 +161,9 @@ Resource: `jlab-mcp://server/status` — returns shared server info and active s
 
 ### Session Lifecycle
 
-- **`start_new_session`**: Creates a new kernel on the shared JupyterLab
+- **`start_new_notebook`**: Creates a new kernel and a new notebook
+- **`start_notebook`**: Attaches a fresh kernel to an existing notebook
+- **Restart kernel**: `shutdown_session` + `start_notebook(same_path)` = fresh kernel on same notebook
 - **`shutdown_session`**: Kills the kernel only. The SLURM job keeps running.
 - **SLURM job dies**: Next tool call returns an error. Run `jlab-mcp start` to restart.
 
