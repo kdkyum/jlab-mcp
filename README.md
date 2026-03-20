@@ -16,7 +16,7 @@ JupyterLab (SLURM compute node or local subprocess)   ← one server, many kerne
 IPython Kernels (GPU access)
 ```
 
-JupyterLab runs either on a SLURM compute node (HPC clusters) or as a local subprocess (laptops/workstations). The server is managed separately from the MCP server — you start it with `jlab-mcp start` and it keeps running across Claude Code sessions. All sessions create separate kernels on this shared server.
+JupyterLab runs either on a SLURM compute node (HPC clusters) or as a local subprocess (laptops/workstations). The server is managed separately from the MCP server — you start it with `jlab-mcp start` and it keeps running across Claude Code sessions. All sessions create separate kernels on this shared server. Each project directory gets its own JupyterLab instance — the status file is scoped by a hash of the working directory where `jlab-mcp start` was run.
 
 ## Local Mode
 
@@ -98,6 +98,7 @@ All settings are configurable via environment variables. No values are hardcoded
 | `JLAB_MCP_DIR` | `~/.jlab-mcp` | Base working directory |
 | `JLAB_MCP_NOTEBOOK_DIR` | `./notebooks` | Notebook storage (relative to cwd) |
 | `JLAB_MCP_LOG_DIR` | `~/.jlab-mcp/logs` | SLURM job logs |
+| `JLAB_MCP_STATUS_DIR` | `~/.jlab-mcp/servers/{name}-{hash}` | Per-project status directory (auto-derived from cwd) |
 | `JLAB_MCP_CONNECTION_DIR` | `~/.jlab-mcp/connections` | Connection info files |
 | `JLAB_MCP_SLURM_PARTITION` | `gpu` | SLURM partition |
 | `JLAB_MCP_SLURM_GRES` | `gpu:1` | SLURM generic resource |

@@ -72,7 +72,13 @@ requests.get("http://ravg1011:18432/api/status", headers={"Authorization": "toke
 
 #### 1f. Write Status File
 
-When ready, writes the per-project status file:
+When ready, writes the per-project status file. The path is derived from the current working directory:
+
+```
+~/.jlab-mcp/servers/{project_name}-{sha256(cwd)[:12]}/server-status
+```
+
+This means each project directory gets its own isolated JupyterLab instance. Both `jlab-mcp start` and the MCP server use `Path.cwd()` to determine which status file to use.
 
 ```
 STATE=ready

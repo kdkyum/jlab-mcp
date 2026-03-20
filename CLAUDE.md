@@ -33,7 +33,7 @@ Claude Code ↔ stdio ↔ MCP Server ↔ HTTP/WS ↔ JupyterLab (SLURM compute n
 ```
 
 Communication happens via:
-1. **Status file** — `jlab-mcp start` writes hostname/port/token, MCP server reads it
+1. **Status file** — `jlab-mcp start` writes hostname/port/token to a per-project file (`~/.jlab-mcp/servers/{name}-{hash}/server-status`), MCP server reads it. Project is determined by `Path.cwd()` at startup.
 2. **JupyterLab REST API** — kernel lifecycle (start, stop, list)
 3. **Kernel WebSocket** — code execution via Jupyter message protocol v5.3
 
