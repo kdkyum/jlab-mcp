@@ -180,8 +180,13 @@ def get_job_state(job_id: str) -> str:
 
 
 def is_job_running(job_id: str) -> bool:
-    """Quick check if job is still running."""
+    """Quick check if job is in RUNNING state."""
     return get_job_state(job_id) == "RUNNING"
+
+
+def is_job_alive(job_id: str) -> bool:
+    """Check if job is in any active SLURM state (PENDING, RUNNING, etc.)."""
+    return get_job_state(job_id) != ""
 
 
 def cleanup_connection_file(path: str | Path) -> None:

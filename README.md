@@ -81,11 +81,13 @@ jlab-mcp stop
 
 | Command | Description |
 |---|---|
-| `jlab-mcp start [TIME]` | Submit SLURM job and wait until ready. Optional TIME overrides `JLAB_MCP_SLURM_TIME` (e.g. `24:00:00`) |
-| `jlab-mcp stop` | Cancel the SLURM job |
-| `jlab-mcp wait` | Poll status (check from another terminal) |
-| `jlab-mcp status` | Print server state, active kernels, and GPU memory |
-| `jlab-mcp` | Run MCP server (used by Claude Code, not run manually) |
+| `jlab-mcp start [TIME] [--debug]` | Start JupyterLab and wait until ready. In SLURM mode, submits a job and polls until the server responds. In local mode, spawns a subprocess and blocks in the foreground. Optional TIME overrides `JLAB_MCP_SLURM_TIME` (e.g. `24:00:00`). Skips submission if an existing server is still running. |
+| `jlab-mcp stop` | Stop JupyterLab. In SLURM mode, runs `scancel`. In local mode, sends SIGTERM to the subprocess. Removes the status file in both cases. |
+| `jlab-mcp wait` | Poll the status file from another terminal until the server is ready (up to 10 min). Prints state transitions (`pending → starting → ready`). Useful for scripts or for monitoring `start` progress from a separate shell. |
+| `jlab-mcp status` | Print server state, mode, hostname, port, and whether the process/job is alive. Lists active kernels with execution state and last activity time. Queries GPU memory and utilization via `nvidia-smi` on a temporary kernel. |
+| `jlab-mcp` | Run MCP server (stdio transport, used by Claude Code — not run manually) |
+
+All commands accept `--debug` to enable verbose logging (status file reads, SLURM parameters, health check attempts, connection file paths) on stderr.
 
 The SLURM job **survives Claude Code restarts**. You only need to run `jlab-mcp start` once per work session.
 

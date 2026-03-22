@@ -1,5 +1,7 @@
+import os
 import re
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -165,9 +167,22 @@ class NotebookManager:
     def save_notebook(
         self, nb_path: Path | str, notebook: nbformat.NotebookNode
     ) -> None:
-        """Write notebook to disk after cleaning."""
+        """Write notebook to disk atomically after cleaning."""
         self.clean_notebook(notebook)
-        nbformat.write(notebook, str(nb_path))
+        nb_path = Path(nb_path)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(nb_path.parent), suffix=".ipynb.tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                nbformat.write(notebook, f)
+            os.replace(tmp_path, str(nb_path))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def clean_notebook(self, notebook: nbformat.NotebookNode) -> None:
         """Ensure all cells have valid IDs (required by nbformat v5+)."""

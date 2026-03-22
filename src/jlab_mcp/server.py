@@ -106,7 +106,15 @@ def _get_or_start_server() -> JupyterServer:
             logger.warning("JupyterLab server not responding, reconnecting...")
             _server = None
             with _sessions_lock:
+                orphaned = list(sessions.values())
                 sessions.clear()
+            for s in orphaned:
+                try:
+                    s.jupyter_client.shutdown_kernel(s.kernel_id)
+                except Exception:
+                    pass
+            if orphaned:
+                logger.info("Cleaned up %d orphaned kernels", len(orphaned))
 
         _server = _connect_to_server()
         logger.info(f"Connected to JupyterLab on {_server.hostname}")
@@ -338,15 +346,22 @@ def start_notebook(notebook_path: str) -> dict:
 
     # Check for an existing session on this notebook with a live kernel
     existing = None
+    candidate = None
     with _sessions_lock:
         for session in sessions.values():
             if session.notebook_path == nb_path:
-                live_ids = {
-                    k["id"] for k in server.client.list_kernels()
-                }
-                if session.kernel_id in live_ids:
-                    existing = session
-                    break
+                candidate = session
+                break
+
+    if candidate is not None:
+        try:
+            live_ids = {k["id"] for k in server.client.list_kernels()}
+        except Exception:
+            live_ids = set()
+        if candidate.kernel_id in live_ids:
+            with _sessions_lock:
+                if candidate.session_id in sessions:
+                    existing = candidate
 
     if existing is not None:
         return {
