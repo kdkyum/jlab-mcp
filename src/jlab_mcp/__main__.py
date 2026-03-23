@@ -165,7 +165,7 @@ def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
                   port=str(port), token=token)
     print(f"SLURM job {job_id} submitted, waiting in queue...", flush=True)
     if debug:
-        log.debug("Connection file: %s", conn_file)
+        log.debug("Connection file: %s, token=%s", conn_file, token)
 
     _wait_for_slurm_server(job_id, conn_file, port, token, debug)
 
@@ -289,7 +289,7 @@ def _cmd_start_local(debug: bool = False):
     )
     print(f"JupyterLab starting (PID {proc.pid})...", flush=True)
     if debug:
-        log.debug("Subprocess PID=%d, target=%s:%s", proc.pid, hostname, port)
+        log.debug("Subprocess PID=%d, target=%s:%s, token=%s", proc.pid, hostname, port, token)
 
     # Wait for health check
     client = JupyterLabClient(hostname, port, token)
@@ -455,6 +455,8 @@ def _cmd_status():
         print(f"Hostname: {info['HOSTNAME']}")
     if "PORT" in info:
         print(f"Port:     {info['PORT']}")
+    if "TOKEN" in info:
+        print(f"Token:    {info['TOKEN']}")
 
     if state != "ready":
         return
