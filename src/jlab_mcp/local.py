@@ -35,7 +35,7 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
         "-m",
         "jupyter",
         "lab",
-        "--ip=0.0.0.0",
+        f"--ip={hostname}",
         f"--port={port}",
         f"--IdentityProvider.token={token}",
         "--no-browser",

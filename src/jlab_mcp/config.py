@@ -76,7 +76,7 @@ def _detect_run_mode() -> str:
 RUN_MODE = _detect_run_mode()
 
 # Local mode bind address
-LOCAL_BIND_IP = _get_str("JLAB_MCP_LOCAL_BIND_IP", "127.0.0.1")
+LOCAL_BIND_IP = _get_str("JLAB_MCP_LOCAL_BIND_IP", "0.0.0.0")
 
 
 def get_template_content() -> str:
