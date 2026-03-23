@@ -136,6 +136,12 @@ class NotebookManager:
         cell_index = self._resolve_cell_index(nb, cell_index)
         return nb.cells[cell_index].source
 
+    def get_cell_type(self, nb_path: Path | str, cell_index: int) -> str:
+        """Read cell type by index. Supports negative indexing."""
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        return nb.cells[cell_index].cell_type
+
     def update_cell_outputs(
         self, nb_path: Path | str, cell_index: int, outputs: list[dict]
     ) -> int:

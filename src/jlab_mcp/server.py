@@ -457,6 +457,11 @@ async def run_cell(session_id: str, cell_index: int, ctx: Context) -> list:
         List of text strings and Image objects.
     """
     session = _get_session(session_id)
+    cell_type = session.notebook_manager.get_cell_type(
+        session.notebook_path, cell_index
+    )
+    if cell_type != "code":
+        return [f"Skipped {cell_type} cell (only code cells can be executed)."]
     source = session.notebook_manager.get_cell_source(
         session.notebook_path, cell_index
     )
