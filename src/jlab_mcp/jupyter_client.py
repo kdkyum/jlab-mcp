@@ -8,7 +8,6 @@ import uuid
 import requests
 import websocket
 
-from jlab_mcp.image_utils import resize_image_if_needed
 
 logger = logging.getLogger("jlab-mcp")
 
@@ -159,11 +158,9 @@ class JupyterLabClient:
                 return [_kernel_died_error()]
 
     @staticmethod
-    def _resize_png(png_base64: str) -> dict:
-        """Decode, resize, and re-encode a base64 PNG image."""
-        image_data = base64.b64decode(png_base64)
-        resized = resize_image_if_needed(image_data)
-        return {"type": "image", "content": base64.b64encode(resized).decode()}
+    def _parse_png(png_base64: str) -> dict:
+        """Wrap a base64 PNG image into an output dict (no resize)."""
+        return {"type": "image", "content": png_base64}
 
     def _execute_on_ws(
         self, ws: websocket.WebSocket, code: str, timeout: int | None
@@ -252,12 +249,12 @@ class JupyterLabClient:
                         {"type": "text", "content": data["text/plain"]}
                     )
                 if "image/png" in data:
-                    outputs.append(self._resize_png(data["image/png"]))
+                    outputs.append(self._parse_png(data["image/png"]))
 
             elif msg_type == "display_data":
                 data = msg["content"].get("data", {})
                 if "image/png" in data:
-                    outputs.append(self._resize_png(data["image/png"]))
+                    outputs.append(self._parse_png(data["image/png"]))
                 elif "text/plain" in data:
                     outputs.append(
                         {"type": "text", "content": data["text/plain"]}

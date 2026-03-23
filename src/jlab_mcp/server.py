@@ -13,6 +13,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 
 from jlab_mcp import config
+from jlab_mcp.image_utils import resize_image_if_needed
 from jlab_mcp.jupyter_client import JupyterLabClient
 from jlab_mcp.notebook import NotebookManager
 
@@ -168,7 +169,8 @@ def _format_outputs(outputs: list[dict]) -> list:
             parts.append(out["content"])
         elif out["type"] == "image":
             image_bytes = base64.b64decode(out["content"])
-            parts.append(Image(data=image_bytes, format="png"))
+            resized = resize_image_if_needed(image_bytes)
+            parts.append(Image(data=resized, format="png"))
         elif out["type"] == "error":
             tb = "\n".join(out.get("traceback", []))
             # Strip ANSI escape codes from IPython tracebacks
