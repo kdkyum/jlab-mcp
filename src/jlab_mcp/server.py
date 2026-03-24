@@ -310,18 +310,20 @@ def start_new_notebook(experiment_name: str) -> dict:
     """
     server = _get_or_start_server()
 
-    # Shut down all existing sessions before starting a new one
+    # Shut down all existing kernels before starting a new one
+    # Use JupyterLab API directly (sessions dict may be empty after process restart)
+    try:
+        existing_kernels = server.client.list_kernels()
+        for k in existing_kernels:
+            try:
+                server.client.shutdown_kernel(k["id"])
+                logger.info(f"Auto-closed previous kernel {k['id']}")
+            except Exception:
+                logger.warning(f"Failed to close kernel {k['id']}", exc_info=True)
+    except Exception:
+        logger.warning("Failed to list existing kernels", exc_info=True)
     with _sessions_lock:
-        old_sessions = list(sessions.items())
-    for sid, old_session in old_sessions:
-        try:
-            old_session.jupyter_client.shutdown_kernel(old_session.kernel_id)
-            logger.info(f"Auto-closed previous session {sid} (kernel={old_session.kernel_id})")
-        except Exception:
-            pass
-    with _sessions_lock:
-        for sid, _ in old_sessions:
-            sessions.pop(sid, None)
+        sessions.clear()
 
     kernel_id = _start_kernel(server)
 
