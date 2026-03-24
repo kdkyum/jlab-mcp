@@ -309,6 +309,20 @@ def start_new_notebook(experiment_name: str) -> dict:
         Dict with session_id, notebook_path, job_id, hostname.
     """
     server = _get_or_start_server()
+
+    # Shut down all existing sessions before starting a new one
+    with _sessions_lock:
+        old_sessions = list(sessions.items())
+    for sid, old_session in old_sessions:
+        try:
+            old_session.jupyter_client.shutdown_kernel(old_session.kernel_id)
+            logger.info(f"Auto-closed previous session {sid} (kernel={old_session.kernel_id})")
+        except Exception:
+            pass
+    with _sessions_lock:
+        for sid, _ in old_sessions:
+            sessions.pop(sid, None)
+
     kernel_id = _start_kernel(server)
 
     try:
