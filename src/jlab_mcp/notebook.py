@@ -196,6 +196,29 @@ class NotebookManager:
             if "id" not in cell or not cell["id"]:
                 cell["id"] = uuid.uuid4().hex[:8]
 
+    def delete_cell(self, nb_path: Path | str, cell_index: int) -> int:
+        """Delete a cell by index. Returns the resolved index."""
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        del nb.cells[cell_index]
+        self.save_notebook(nb_path, nb)
+        return cell_index
+
+    def edit_markdown_cell(
+        self, nb_path: Path | str, cell_index: int, markdown: str
+    ) -> int:
+        """Replace a markdown cell's content. Returns the resolved index."""
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        if nb.cells[cell_index].cell_type != "markdown":
+            raise ValueError(
+                f"Cell {cell_index} is a {nb.cells[cell_index].cell_type} cell, "
+                f"not a markdown cell"
+            )
+        nb.cells[cell_index].source = markdown
+        self.save_notebook(nb_path, nb)
+        return cell_index
+
     def get_cell_count(self, nb_path: Path | str) -> int:
         """Get number of cells in a notebook."""
         nb = self.get_notebook(nb_path)

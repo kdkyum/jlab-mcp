@@ -510,6 +510,43 @@ def add_markdown(session_id: str, markdown: str, cell_index: int = -1) -> str:
 
 
 @mcp.tool()
+def edit_markdown(session_id: str, cell_index: int, markdown: str) -> str:
+    """Edit an existing markdown cell's content.
+
+    Args:
+        session_id: Session identifier.
+        cell_index: Cell index (supports negative indexing).
+        markdown: New markdown content.
+
+    Returns:
+        Confirmation string.
+    """
+    session = _get_session(session_id)
+    resolved = session.notebook_manager.edit_markdown_cell(
+        session.notebook_path, cell_index, markdown
+    )
+    return f"Markdown cell {resolved} updated"
+
+
+@mcp.tool()
+def delete_cell(session_id: str, cell_index: int) -> str:
+    """Delete a cell (code or markdown) from the notebook.
+
+    Args:
+        session_id: Session identifier.
+        cell_index: Cell index (supports negative indexing).
+
+    Returns:
+        Confirmation string.
+    """
+    session = _get_session(session_id)
+    resolved = session.notebook_manager.delete_cell(
+        session.notebook_path, cell_index
+    )
+    return f"Deleted cell at index {resolved}"
+
+
+@mcp.tool()
 def shutdown_session(session_id: str) -> str:
     """Shutdown session: stop kernel. The SLURM job stays alive for other sessions.
 
