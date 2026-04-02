@@ -26,6 +26,9 @@ JLAB_MCP_DIR = _get_path("JLAB_MCP_DIR", "~/.jlab-mcp")
 # Notebook storage (defaults to cwd/notebooks)
 NOTEBOOK_DIR = _get_path("JLAB_MCP_NOTEBOOK_DIR", str(Path.cwd() / "notebooks"))
 
+# JupyterLab root directory (what the file browser sees; defaults to project root)
+SERVER_ROOT_DIR = _get_path("JLAB_MCP_SERVER_ROOT_DIR", str(Path.cwd()))
+
 # SLURM job logs
 LOG_DIR = _get_path("JLAB_MCP_LOG_DIR", str(JLAB_MCP_DIR / "logs"))
 

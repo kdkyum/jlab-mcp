@@ -43,7 +43,7 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
         "--MappingKernelManager.cull_idle_timeout=0",
         "--MappingKernelManager.cull_interval=300",
         "--MappingKernelManager.cull_connected=True",
-        f"--notebook-dir={config.NOTEBOOK_DIR}",
+        f"--notebook-dir={config.SERVER_ROOT_DIR}",
     ]
 
     # Set VIRTUAL_ENV so JupyterLab picks up the project's venv

@@ -41,7 +41,7 @@ def render_slurm_script(
         port=port,
         token=token,
         connection_file=connection_file,
-        notebook_dir=notebook_dir or str(config.NOTEBOOK_DIR),
+        notebook_dir=notebook_dir or str(config.SERVER_ROOT_DIR),
         log_dir=log_dir or str(config.LOG_DIR),
         project_dir=project_dir or str(config.PROJECT_DIR),
         partition=config.SLURM_PARTITION,
