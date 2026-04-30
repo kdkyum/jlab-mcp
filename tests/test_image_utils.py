@@ -21,22 +21,22 @@ class TestCalculateResizeDimensions:
         assert _calculate_resize_dimensions(100, 100) == (100, 100)
 
     def test_square_at_limit(self):
-        assert _calculate_resize_dimensions(512, 512) == (512, 512)
+        assert _calculate_resize_dimensions(2576, 2576) == (2576, 2576)
 
     def test_wide_image(self):
-        w, h = _calculate_resize_dimensions(1024, 512)
-        assert w == 512
-        assert h == 256
+        w, h = _calculate_resize_dimensions(5152, 2576)
+        assert w == 2576
+        assert h == 1288
 
     def test_tall_image(self):
-        w, h = _calculate_resize_dimensions(512, 1024)
-        assert w == 256
-        assert h == 512
+        w, h = _calculate_resize_dimensions(2576, 5152)
+        assert w == 1288
+        assert h == 2576
 
     def test_very_large(self):
-        w, h = _calculate_resize_dimensions(4000, 3000)
-        assert w == 512
-        assert h == 384
+        w, h = _calculate_resize_dimensions(8000, 6000)
+        assert w == 2576
+        assert h == 1932
 
     def test_maintains_aspect_ratio(self):
         w, h = _calculate_resize_dimensions(1000, 500, max_dim=200)
@@ -56,24 +56,24 @@ class TestResizeImageIfNeeded:
         assert result == original
 
     def test_at_limit_passthrough(self):
-        original = _make_png(512, 512)
+        original = _make_png(2576, 2576)
         result = resize_image_if_needed(original)
         assert result == original
 
     def test_large_image_resized(self):
-        original = _make_png(1024, 768)
+        original = _make_png(5000, 3000)
         result = resize_image_if_needed(original)
         assert result != original
         img = Image.open(io.BytesIO(result))
-        assert img.width <= 512
-        assert img.height <= 512
+        assert img.width <= 2576
+        assert img.height <= 2576
 
     def test_maintains_aspect_ratio(self):
-        original = _make_png(2000, 1000)
+        original = _make_png(6000, 3000)
         result = resize_image_if_needed(original)
         img = Image.open(io.BytesIO(result))
-        assert img.width == 512
-        assert img.height == 256
+        assert img.width == 2576
+        assert img.height == 1288
 
     def test_invalid_data_returns_original(self):
         bad_data = b"not an image"

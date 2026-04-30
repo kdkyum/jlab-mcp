@@ -162,6 +162,21 @@ class JupyterLabClient:
         """Wrap a base64 PNG image into an output dict (no resize)."""
         return {"type": "image", "content": png_base64}
 
+    @staticmethod
+    def _parse_jpeg(jpeg_base64: str) -> dict:
+        """Decode a base64 JPEG, re-encode as PNG, return output dict.
+
+        Downstream (_format_outputs) assumes PNG, so normalise here.
+        """
+        import io as _io
+
+        from PIL import Image as _PILImage
+
+        img = _PILImage.open(_io.BytesIO(base64.b64decode(jpeg_base64)))
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return {"type": "image", "content": base64.b64encode(buf.getvalue()).decode("ascii")}
+
     def _execute_on_ws(
         self, ws: websocket.WebSocket, code: str, timeout: int | None
     ) -> list[dict]:
@@ -250,11 +265,15 @@ class JupyterLabClient:
                     )
                 if "image/png" in data:
                     outputs.append(self._parse_png(data["image/png"]))
+                elif "image/jpeg" in data:
+                    outputs.append(self._parse_jpeg(data["image/jpeg"]))
 
             elif msg_type == "display_data":
                 data = msg["content"].get("data", {})
                 if "image/png" in data:
                     outputs.append(self._parse_png(data["image/png"]))
+                elif "image/jpeg" in data:
+                    outputs.append(self._parse_jpeg(data["image/jpeg"]))
                 elif "text/plain" in data:
                     outputs.append(
                         {"type": "text", "content": data["text/plain"]}

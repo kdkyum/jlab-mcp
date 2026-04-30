@@ -45,7 +45,7 @@ Communication happens via:
 - **jupyter_client.py** — `JupyterLabClient` class: REST API calls (`requests`) for kernel management, WebSocket (`websocket-client`) for code execution. Caches one WebSocket per kernel (`_ws_cache`) to avoid reconnection storms — critical during `restore_notebook` which executes many cells sequentially. Collects outputs (text/image/error) until kernel goes idle.
 - **notebook.py** — `NotebookManager` class: creates/edits/saves `.ipynb` files with `nbformat`. Handles output conversion, cell ID generation, and notebook restoration (re-executing all cells).
 - **config.py** — All defaults overridable via `JLAB_MCP_*` environment variables. Directories auto-created on import.
-- **image_utils.py** — Resizes images >512px maintaining aspect ratio (Pillow). Gracefully returns original bytes on error.
+- **image_utils.py** — Resizes images >2576px on the long edge maintaining aspect ratio (Pillow). Gracefully returns original bytes on error.
 - **__main__.py** — CLI entry point: `jlab-mcp start [--debug]`, `stop`, `wait`, `status`, or MCP server (no args). Parses `JLAB_MCP_RUN_MODE` for SLURM vs local mode.
 
 ### Session Lifecycle

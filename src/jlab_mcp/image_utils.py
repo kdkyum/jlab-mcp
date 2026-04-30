@@ -4,7 +4,7 @@ from PIL import Image
 
 
 def _calculate_resize_dimensions(
-    width: int, height: int, max_dim: int = 512
+    width: int, height: int, max_dim: int = 2576
 ) -> tuple[int, int]:
     """Calculate new dimensions maintaining aspect ratio."""
     if width <= max_dim and height <= max_dim:
@@ -21,7 +21,7 @@ def _calculate_resize_dimensions(
 
 
 def resize_image_if_needed(
-    image_data: bytes, max_dim: int = 512
+    image_data: bytes, max_dim: int = 2576
 ) -> bytes:
     """Resize image if any dimension exceeds max_dim. Returns PNG bytes."""
     try:
