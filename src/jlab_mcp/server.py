@@ -98,28 +98,44 @@ def _get_or_start_server() -> JupyterServer:
 
     Reads connection info from the status file written by `jlab-mcp start`.
     If the server stops responding, clears cached state and reconnects.
+
+    Network I/O happens outside _server_lock so a slow health check can't
+    stall every other tool call.
     """
     global _server
     with _server_lock:
-        if _server is not None:
-            if _server.client.health_check():
-                return _server
-            logger.warning("JupyterLab server not responding, reconnecting...")
-            _server = None
-            with _sessions_lock:
-                orphaned = list(sessions.values())
-                sessions.clear()
-            for s in orphaned:
-                try:
-                    s.jupyter_client.shutdown_kernel(s.kernel_id)
-                except Exception:
-                    pass
-            if orphaned:
-                logger.info("Cleaned up %d orphaned kernels", len(orphaned))
+        srv = _server
 
-        _server = _connect_to_server()
-        logger.info(f"Connected to JupyterLab on {_server.hostname}")
-        return _server
+    if srv is not None:
+        # One failed GET is not server death (transient blips happen exactly
+        # when long executions are in flight) — require repeated failures.
+        for attempt in range(3):
+            if srv.client.health_check():
+                return srv
+            if attempt < 2:
+                time.sleep(1)
+        logger.warning("JupyterLab server not responding, reconnecting...")
+        with _server_lock:
+            if _server is srv:
+                _server = None
+        # Drop session bookkeeping only. Do NOT shutdown_kernel/_close_ws
+        # here: if the server is merely unreachable from this side, closing
+        # cached WebSockets would falsely kill in-flight executions; if it
+        # is truly dead, the kernels are gone anyway.
+        with _sessions_lock:
+            orphaned = len(sessions)
+            sessions.clear()
+        if orphaned:
+            logger.info("Dropped %d orphaned session(s)", orphaned)
+
+    new_server = _connect_to_server()
+    with _server_lock:
+        if _server is None:
+            _server = new_server
+        else:
+            new_server = _server  # another thread reconnected first
+    logger.info(f"Connected to JupyterLab on {new_server.hostname}")
+    return new_server
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +208,17 @@ def _start_kernel(server: JupyterServer) -> str:
     return kernel_id
 
 
+def _shutdown_kernel_in_background(client: JupyterLabClient, kernel_id: str) -> None:
+    """Shut down a throwaway kernel without blocking the event loop."""
+    def _shutdown():
+        try:
+            client.shutdown_kernel(kernel_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_shutdown, daemon=True).start()
+
+
 def _register_session(
     kernel_id: str,
     client: JupyterLabClient,
@@ -256,12 +283,13 @@ async def _run_with_progress(
 
 
 def _interrupt_and_close_ws(client: JupyterLabClient, kernel_id: str) -> None:
-    """Interrupt a kernel and close its cached WebSocket.
+    """Interrupt a kernel and abort its in-flight execution.
 
-    Used on cancellation to stop the kernel and unblock any background
-    thread stuck on ws.recv().
+    Used on cancellation: closes the cached WebSocket (unblocking any
+    background thread stuck on ws.recv()) and marks the execution
+    cancelled so the client does not reconnect and re-send the code.
     """
-    client._close_ws(kernel_id)
+    client.cancel_execution(kernel_id)
     try:
         client.interrupt_kernel(kernel_id)
     except Exception:
@@ -290,6 +318,35 @@ async def _execute_with_cancellation(
     except asyncio.CancelledError:
         _interrupt_and_close_ws(client, kernel_id)
         raise
+
+
+def _save_outputs_and_format(
+    session: Session, cell_id: str, outputs: list[dict]
+) -> list:
+    """Persist execution outputs to the notebook (by cell id), then format.
+
+    The cell is located by its stable nbformat id, not by position — the
+    positional index can shift while code runs (concurrent cell edits).
+    A failed save must not discard the outputs of an execution that
+    already happened, so save errors become a warning in the response.
+    """
+    warning = None
+    try:
+        session.notebook_manager.update_cell_outputs_by_id(
+            session.notebook_path, cell_id, outputs
+        )
+    except Exception as e:
+        warning = (
+            "Warning: the code executed, but saving its outputs to the "
+            f"notebook failed: {e}"
+        )
+        logger.warning(
+            "Failed to save outputs to %s: %s", session.notebook_path, e
+        )
+    parts = _format_outputs(outputs)
+    if warning:
+        parts.append(warning)
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -362,24 +419,30 @@ def start_notebook(notebook_path: str) -> dict:
     nb_path = _validate_notebook_path(notebook_path)
     server = _get_or_start_server()
 
-    # Check for an existing session on this notebook with a live kernel
-    existing = None
-    candidate = None
+    # Check for existing sessions on this notebook. Compare resolved paths:
+    # NOTEBOOK_DIR may be reached through symlinks (e.g. /ptmp -> /viper/ptmp2)
+    # and a naive equality check would never match.
     with _sessions_lock:
-        for session in sessions.values():
-            if session.notebook_path == nb_path:
-                candidate = session
-                break
+        candidates = [
+            s for s in sessions.values()
+            if Path(s.notebook_path).resolve() == nb_path
+        ]
 
-    if candidate is not None:
+    existing = None
+    if candidates:
         try:
             live_ids = {k["id"] for k in server.client.list_kernels()}
         except Exception:
             live_ids = set()
-        if candidate.kernel_id in live_ids:
-            with _sessions_lock:
-                if candidate.session_id in sessions:
-                    existing = candidate
+        # Purge dead sessions for this notebook — otherwise a session whose
+        # kernel died keeps shadowing live ones, and every start_notebook
+        # call would leak another fresh kernel.
+        with _sessions_lock:
+            for s in candidates:
+                if s.kernel_id not in live_ids:
+                    sessions.pop(s.session_id, None)
+                elif existing is None and s.session_id in sessions:
+                    existing = s
 
     if existing is not None:
         return {
@@ -429,13 +492,11 @@ async def execute_code(
     idx = session.notebook_manager.add_code_cell(
         session.notebook_path, code, index=cell_index
     )
+    cell_id = session.notebook_manager.get_cell_id(session.notebook_path, idx)
     outputs = await _execute_with_cancellation(
         ctx, session.jupyter_client, session.kernel_id, code
     )
-    session.notebook_manager.update_cell_outputs(
-        session.notebook_path, idx, outputs
-    )
-    return _format_outputs(outputs)
+    return _save_outputs_and_format(session, cell_id, outputs)
 
 
 @mcp.tool()
@@ -483,13 +544,15 @@ async def run_cell(session_id: str, cell_index: int, ctx: Context) -> list:
     source = session.notebook_manager.get_cell_source(
         session.notebook_path, cell_index
     )
+    # Pin the cell by id before executing: a negative/positional index can
+    # point at a different cell by the time the execution finishes
+    cell_id = session.notebook_manager.get_cell_id(
+        session.notebook_path, cell_index
+    )
     outputs = await _execute_with_cancellation(
         ctx, session.jupyter_client, session.kernel_id, source
     )
-    session.notebook_manager.update_cell_outputs(
-        session.notebook_path, cell_index, outputs
-    )
-    return _format_outputs(outputs)
+    return _save_outputs_and_format(session, cell_id, outputs)
 
 
 @mcp.tool()
@@ -599,7 +662,7 @@ def interrupt_kernel(session_id: str) -> str:
 
 
 @mcp.tool()
-def ping() -> dict:
+async def ping() -> dict:
     """Check if JupyterLab is reachable and responding.
 
     Lightweight health check — no kernel needed. Use this to verify
@@ -624,19 +687,25 @@ def ping() -> dict:
         return {"status": "error", "message": "Incomplete status file"}
 
     client = JupyterLabClient(hostname, int(port), token)
-    healthy = client.health_check()
+    # Network I/O off the event loop: ping is typically called WHILE a long
+    # execution is running, and blocking the loop here would starve the
+    # progress keepalives that execution depends on
+    healthy = await asyncio.to_thread(client.health_check)
+
+    with _sessions_lock:
+        active_sessions = len(sessions)
 
     result = {
         "status": "ok" if healthy else "unreachable",
         "hostname": hostname,
         "url": f"http://{hostname}:{port}",
         "healthy": healthy,
-        "active_sessions": len(sessions),
+        "active_sessions": active_sessions,
     }
 
     if healthy:
         try:
-            kernels = client.list_kernels()
+            kernels = await asyncio.to_thread(client.list_kernels)
             result["kernels"] = [
                 {
                     "id": k["id"],
@@ -653,7 +722,7 @@ def ping() -> dict:
 
 
 @mcp.tool()
-def check_resources() -> dict:
+async def check_resources() -> dict:
     """Check compute resource usage: CPU, memory, and GPU.
 
     Runs on a throwaway kernel so it does not pollute session state.
@@ -728,16 +797,15 @@ except Exception as e:
 
 print(json.dumps(result))
 """
-    server = _get_or_start_server()
-    kernel_id = server.client.start_kernel()
-    time.sleep(2)
+    server = await asyncio.to_thread(_get_or_start_server)
+    kernel_id = await asyncio.to_thread(server.client.start_kernel)
+    await asyncio.sleep(2)
     try:
-        outputs = server.client.execute_code(kernel_id, code, timeout=30)
+        outputs = await asyncio.to_thread(
+            server.client.execute_code, kernel_id, code, 30
+        )
     finally:
-        try:
-            server.client.shutdown_kernel(kernel_id)
-        except Exception:
-            pass
+        _shutdown_kernel_in_background(server.client, kernel_id)
 
     for out in outputs:
         if out["type"] == "text":
@@ -764,19 +832,19 @@ async def execute_scratch(code: str, ctx: Context) -> list:
     Returns:
         List of text strings and Image objects.
     """
-    server = _get_or_start_server()
-    kernel_id = server.client.start_kernel()
-    time.sleep(2)
+    server = await asyncio.to_thread(_get_or_start_server)
+    kernel_id = await asyncio.to_thread(server.client.start_kernel)
+    await asyncio.sleep(2)
     try:
         outputs = await _execute_with_cancellation(
             ctx, server.client, kernel_id, code
         )
         return _format_outputs(outputs)
     finally:
-        try:
-            server.client.shutdown_kernel(kernel_id)
-        except Exception:
-            pass
+        # Runs in a daemon thread: must not block the loop, and must work
+        # even when this coroutine is being cancelled (awaiting in a
+        # finally during cancellation would raise immediately)
+        _shutdown_kernel_in_background(server.client, kernel_id)
 
 
 # ---------------------------------------------------------------------------
@@ -784,19 +852,22 @@ async def execute_scratch(code: str, ctx: Context) -> list:
 # ---------------------------------------------------------------------------
 
 @mcp.resource("jlab-mcp://server/status")
-def server_status() -> dict:
+async def server_status() -> dict:
     """Get server status: shared SLURM job, active sessions."""
+    with _server_lock:
+        srv = _server  # snapshot: the reconnect path may null this out
+
     server_info = {}
-    if _server is not None:
+    if srv is not None:
         healthy = False
         try:
-            healthy = _server.client.health_check()
+            healthy = await asyncio.to_thread(srv.client.health_check)
         except Exception:
             pass
         server_info = {
-            "job_id": _server.job_id,
-            "hostname": _server.hostname,
-            "url": _server.client.base_url,
+            "job_id": srv.job_id,
+            "hostname": srv.hostname,
+            "url": srv.client.base_url,
             "healthy": healthy,
         }
 

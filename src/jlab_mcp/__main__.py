@@ -1,11 +1,35 @@
+import fcntl
 import logging
+import os
 import signal
 import sys
 import time
+from contextlib import contextmanager
 
 from jlab_mcp import config
 
 _STATUS_FILE = config.STATUS_FILE
+_LOCK_FILE = config.STATUS_DIR / "lifecycle.lock"
+
+
+@contextmanager
+def _lifecycle_lock():
+    """Serialize start/stop for this project so two concurrent commands
+    can't both submit jobs or race the status file."""
+    fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                "Another jlab-mcp start/stop is already running for this "
+                "project. Follow it with: jlab-mcp wait",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        yield
+    finally:
+        os.close(fd)
 
 
 def main():
@@ -30,7 +54,8 @@ def main():
             time_limit = args[1] if len(args) > 1 else None
             _cmd_start(time_limit=time_limit, debug=debug)
         elif cmd == "stop":
-            _cmd_stop()
+            with _lifecycle_lock():
+                _cmd_stop()
         elif cmd == "wait":
             _cmd_wait()
         elif cmd == "status":
@@ -52,11 +77,23 @@ def main():
 # ---------------------------------------------------------------------------
 
 def _write_status(state: str, **kwargs: str) -> None:
-    """Write current server state to the status file."""
+    """Write current server state to the status file.
+
+    Atomic (readers polling the file never see a partial write) and 0600
+    (the ready state contains the JupyterLab token).
+    """
     lines = [f"STATE={state}"]
     for k, v in kwargs.items():
         lines.append(f"{k.upper()}={v}")
-    _STATUS_FILE.write_text("\n".join(lines) + "\n")
+    tmp = _STATUS_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, _STATUS_FILE)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _clear_status() -> None:
@@ -85,18 +122,34 @@ def _read_status():
 # ---------------------------------------------------------------------------
 
 def _cmd_start(time_limit: str | None = None, debug: bool = False):
-    """Start JupyterLab — dispatches to SLURM or local mode."""
+    """Start JupyterLab — dispatches to SLURM or local mode.
+
+    Locking note: the lifecycle lock covers only the startup transition.
+    Local mode blocks in the foreground for the server's whole lifetime,
+    and holding the lock there would make `jlab-mcp stop` from another
+    terminal impossible.
+    """
     if config.RUN_MODE == "local":
         _cmd_start_local(debug=debug)
     else:
-        _cmd_start_slurm(time_limit=time_limit, debug=debug)
+        with _lifecycle_lock():
+            _cmd_start_slurm(time_limit=time_limit, debug=debug)
+
+
+def _cancel_job_quietly(job_id: str) -> None:
+    """Best-effort job cancellation (failure is reported, not raised)."""
+    from jlab_mcp.slurm import cancel_job
+
+    try:
+        cancel_job(job_id)
+    except Exception as e:
+        print(f"Warning: could not cancel job {job_id}: {e}", file=sys.stderr)
 
 
 def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
     """Submit SLURM job and wait until JupyterLab is ready."""
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.slurm import (
-        cancel_job,
         is_job_alive,
         is_job_running,
         submit_job,
@@ -126,32 +179,31 @@ def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
                     return
             # Job running but JupyterLab not responding
             print(f"Job {job_id} on {hostname} not responding, cancelling...", flush=True)
-            cancel_job(job_id)
+            _cancel_job_quietly(job_id)
         if debug:
             log.debug("Stale status file, clearing")
         _clear_status()
 
-    elif state in ("pending", "starting"):
+    elif state in ("pending", "starting", "error"):
+        # A pending/starting job is resumable; an 'error' state can also
+        # carry a live job with intact connection info (e.g. a previous
+        # readiness wait failed transiently) — resume rather than throwing
+        # away a queued/running allocation.
         job_id = info.get("JOB_ID", "")
         if job_id and is_job_alive(job_id):
-            # Resume waiting for existing job
             conn_file = info.get("CONN_FILE", "")
             port = info.get("PORT", "")
             token = info.get("TOKEN", "")
             if conn_file and port and token:
                 print(f"Resuming wait for job {job_id}...", flush=True)
+                _write_status("pending", job_id=job_id, conn_file=conn_file,
+                              port=port, token=token)
                 _wait_for_slurm_server(job_id, conn_file, int(port), token, debug)
                 return
             # Missing connection info — cancel and resubmit
             if debug:
                 log.debug("Status file missing connection info, cancelling job %s", job_id)
-            cancel_job(job_id)
-        _clear_status()
-
-    elif state == "error":
-        job_id = info.get("JOB_ID", "")
-        if job_id and is_job_alive(job_id):
-            cancel_job(job_id)
+            _cancel_job_quietly(job_id)
         _clear_status()
 
     # Submit new job
@@ -170,6 +222,19 @@ def _cmd_start_slurm(time_limit: str | None = None, debug: bool = False):
     _wait_for_slurm_server(job_id, conn_file, port, token, debug)
 
 
+def _fail_running_job(job_id: str, conn_file: str, message: str):
+    """A running job failed to become ready: cancel it (so it doesn't burn
+    its allocation unreachable), clean up, record the error, and exit."""
+    from jlab_mcp.slurm import cleanup_connection_file
+
+    print(f"Cancelling SLURM job {job_id}: {message}", file=sys.stderr)
+    _cancel_job_quietly(job_id)
+    cleanup_connection_file(conn_file)
+    _write_status("error", job_id=job_id, message=message)
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _wait_for_slurm_server(
     job_id: str, conn_file: str, port: int | str, token: str,
     debug: bool = False,
@@ -181,6 +246,7 @@ def _wait_for_slurm_server(
     """
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.slurm import (
+        cleanup_connection_file,
         is_job_running,
         wait_for_connection_file,
         wait_for_job_running,
@@ -201,9 +267,23 @@ def _wait_for_slurm_server(
         # Wait for job to start running (skip if already running)
         if not is_job_running(job_id):
             try:
-                hostname = wait_for_job_running(job_id, timeout=300)
+                hostname = wait_for_job_running(
+                    job_id, timeout=config.QUEUE_TIMEOUT
+                )
+            except TimeoutError as e:
+                # The job is still healthily queued — keep the 'pending'
+                # status so the next `jlab-mcp start` resumes this job
+                # instead of cancelling it and going to the back of the
+                # queue. (Long queue waits are routine on busy partitions.)
+                print(f"{e}", file=sys.stderr)
+                print("Job is still in the queue; status stays 'pending'.", flush=True)
+                print("  Resume:  jlab-mcp start", flush=True)
+                print("  Cancel:  jlab-mcp stop", flush=True)
+                sys.exit(1)
             except Exception as e:
+                # Job actually left the queue without running (failed)
                 _write_status("error", job_id=job_id, message=str(e))
+                cleanup_connection_file(conn_file)
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
             _write_status("starting", job_id=job_id, hostname=hostname,
@@ -212,9 +292,14 @@ def _wait_for_slurm_server(
 
         # Wait for connection file
         try:
-            conn_info = wait_for_connection_file(conn_file, timeout=120, job_id=job_id)
+            conn_info = wait_for_connection_file(
+                conn_file, timeout=config.READY_TIMEOUT, job_id=job_id
+            )
+        except TimeoutError as e:
+            _fail_running_job(job_id, conn_file, str(e))
         except Exception as e:
             _write_status("error", job_id=job_id, message=str(e))
+            cleanup_connection_file(conn_file)
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -228,9 +313,10 @@ def _wait_for_slurm_server(
 
         start_t = time.time()
         attempt = 0
-        while time.time() - start_t < 120:
+        while time.time() - start_t < config.READY_TIMEOUT:
             if not is_job_running(job_id):
                 _write_status("error", job_id=job_id, message="Job cancelled")
+                cleanup_connection_file(conn_file)
                 print(f"SLURM job {job_id} is no longer running.", file=sys.stderr)
                 sys.exit(1)
             attempt += 1
@@ -242,14 +328,15 @@ def _wait_for_slurm_server(
                 break
             time.sleep(3)
         else:
-            _write_status("error", job_id=job_id, message="JupyterLab timeout")
-            print(
-                f"Timeout: JupyterLab not responding at {client.base_url}",
-                file=sys.stderr,
+            _fail_running_job(
+                job_id, conn_file,
+                f"JupyterLab not responding at {client.base_url}",
             )
-            sys.exit(1)
 
         _write_status("ready", job_id=job_id, hostname=host, port=p, token=tok)
+        # The connection file has served its purpose (the token now lives in
+        # the 0600 status file) — don't leave token-bearing files behind
+        cleanup_connection_file(conn_file)
         if debug:
             log.debug("Status file written: state=ready host=%s port=%s", host, p)
         print(f"JupyterLab ready at {client.base_url}", flush=True)
@@ -259,83 +346,89 @@ def _wait_for_slurm_server(
 
 
 def _cmd_start_local(debug: bool = False):
-    """Start JupyterLab as a local subprocess (foreground)."""
+    """Start JupyterLab as a local subprocess (foreground).
+
+    The lifecycle lock is held only through the startup transition and
+    released before the foreground wait — otherwise `jlab-mcp stop` from
+    another terminal could never acquire it.
+    """
     from jlab_mcp.jupyter_client import JupyterLabClient
     from jlab_mcp.local import is_local_running, start_jupyter_local, stop_jupyter_local
 
     log = logging.getLogger("jlab-mcp")
 
-    # Check if already running
-    state, info = _read_status()
-    if debug:
-        log.debug("Status file: state=%s info=%s", state, info)
-    if state == "ready" and info.get("MODE") == "local":
-        pid = int(info.get("PID", "0"))
-        if pid and is_local_running(pid):
-            hostname = info.get("HOSTNAME", "?")
-            port = info.get("PORT", "?")
-            print(f"JupyterLab already running at {hostname}:{port} (PID {pid})")
-            return
+    with _lifecycle_lock():
+        # Check if already running
+        state, info = _read_status()
         if debug:
-            log.debug("Stale status file (process not running), clearing")
-        _clear_status()
+            log.debug("Status file: state=%s info=%s", state, info)
+        if state == "ready" and info.get("MODE") == "local":
+            pid = int(info.get("PID", "0"))
+            if pid and is_local_running(pid):
+                hostname = info.get("HOSTNAME", "?")
+                port = info.get("PORT", "?")
+                print(f"JupyterLab already running at {hostname}:{port} (PID {pid})")
+                return
+            if debug:
+                log.debug("Stale status file (process not running), clearing")
+            _clear_status()
 
-    if debug:
-        log.debug("Starting local JupyterLab subprocess")
-    proc, hostname, port, token = start_jupyter_local()
-    _write_status(
-        "starting", mode="local", pid=str(proc.pid),
-        hostname=hostname, port=str(port), token=token,
-    )
-    print(f"JupyterLab starting (PID {proc.pid})...", flush=True)
-    if debug:
-        log.debug("Subprocess PID=%d, target=%s:%s, token=%s", proc.pid, hostname, port, token)
+        if debug:
+            log.debug("Starting local JupyterLab subprocess")
+        proc, hostname, port, token = start_jupyter_local()
+        _write_status(
+            "starting", mode="local", pid=str(proc.pid),
+            hostname=hostname, port=str(port), token=token,
+        )
+        print(f"JupyterLab starting (PID {proc.pid})...", flush=True)
+        if debug:
+            log.debug("Subprocess PID=%d, target=%s:%s, token=%s", proc.pid, hostname, port, token)
 
-    # Wait for health check
-    client = JupyterLabClient(hostname, port, token)
-    start_t = time.time()
-    attempt = 0
-    try:
-        while time.time() - start_t < 60:
-            if proc.poll() is not None:
-                _write_status("error", mode="local", message="Process exited early")
+        # Wait for health check
+        client = JupyterLabClient(hostname, port, token)
+        start_t = time.time()
+        attempt = 0
+        try:
+            while time.time() - start_t < 60:
+                if proc.poll() is not None:
+                    # Keep the error status so `jlab-mcp wait` fails fast
+                    # instead of polling for a file that never appears
+                    _write_status("error", mode="local", message="Process exited early")
+                    print(
+                        f"JupyterLab process exited with code {proc.returncode}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                attempt += 1
+                if debug:
+                    log.debug("Health check attempt %d -> %s", attempt, client.base_url)
+                if client.health_check():
+                    if debug:
+                        log.debug("Health check passed after %d attempts", attempt)
+                    break
+                time.sleep(1)
+            else:
+                stop_jupyter_local(proc.pid)
+                _write_status("error", mode="local", message="JupyterLab timeout")
                 print(
-                    f"JupyterLab process exited with code {proc.returncode}",
+                    f"Timeout: JupyterLab not responding at {client.base_url}",
                     file=sys.stderr,
                 )
-                _clear_status()
                 sys.exit(1)
-            attempt += 1
-            if debug:
-                log.debug("Health check attempt %d -> %s", attempt, client.base_url)
-            if client.health_check():
-                if debug:
-                    log.debug("Health check passed after %d attempts", attempt)
-                break
-            time.sleep(1)
-        else:
+        except KeyboardInterrupt:
+            print("\nInterrupted during startup, stopping JupyterLab...", flush=True)
             stop_jupyter_local(proc.pid)
-            _write_status("error", mode="local", message="JupyterLab timeout")
-            print(
-                f"Timeout: JupyterLab not responding at {client.base_url}",
-                file=sys.stderr,
-            )
             _clear_status()
-            sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nInterrupted during startup, stopping JupyterLab...", flush=True)
-        stop_jupyter_local(proc.pid)
-        _clear_status()
-        sys.exit(130)
+            sys.exit(130)
 
-    _write_status(
-        "ready", mode="local", pid=str(proc.pid),
-        hostname=hostname, port=str(port), token=token,
-    )
-    if debug:
-        log.debug("Status file written: state=ready pid=%d host=%s port=%s", proc.pid, hostname, port)
-    print(f"JupyterLab ready at {client.base_url} (PID {proc.pid})", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
+        _write_status(
+            "ready", mode="local", pid=str(proc.pid),
+            hostname=hostname, port=str(port), token=token,
+        )
+        if debug:
+            log.debug("Status file written: state=ready pid=%d host=%s port=%s", proc.pid, hostname, port)
+        print(f"JupyterLab ready at {client.base_url} (PID {proc.pid})", flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
 
     # Block in foreground, clean up on signal
     def _shutdown(signum, frame):
@@ -382,9 +475,10 @@ def _cmd_stop():
         _clear_status()
         print(f"Local JupyterLab (PID {pid}) stopped.")
     else:
-        from jlab_mcp.slurm import cancel_job
+        from jlab_mcp.slurm import cancel_job, cleanup_connection_file
 
         job_id = info.get("JOB_ID")
+        conn_file = info.get("CONN_FILE", "")
         if not job_id:
             print("No running job found.")
             _clear_status()
@@ -392,7 +486,13 @@ def _cmd_stop():
         try:
             cancel_job(job_id)
         except Exception as e:
+            # Keep the status file so the job stays tracked and stop can
+            # be retried — clearing it here would orphan a live job.
             print(f"Error cancelling job {job_id}: {e}", file=sys.stderr)
+            print("Status kept — run `jlab-mcp stop` again to retry.", file=sys.stderr)
+            sys.exit(1)
+        if conn_file:
+            cleanup_connection_file(conn_file)
         _clear_status()
         print(f"SLURM job {job_id} cancelled.")
 

@@ -1,5 +1,7 @@
+import logging
 import os
 import random
+import re
 import secrets
 import subprocess
 import tempfile
@@ -7,6 +9,12 @@ import time
 from pathlib import Path
 
 from jlab_mcp import config
+
+logger = logging.getLogger("jlab-mcp")
+
+
+class SlurmCommandError(RuntimeError):
+    """A SLURM command (squeue/scancel) itself failed — job state unknown."""
 
 
 def random_port() -> int:
@@ -54,10 +62,14 @@ def render_slurm_script(
 
 
 def parse_sbatch_output(stdout: str) -> str:
-    """Parse job ID from sbatch stdout like 'Submitted batch job 12345'."""
-    parts = stdout.strip().split()
-    if len(parts) >= 4 and parts[0] == "Submitted":
-        return parts[-1]
+    """Parse job ID from sbatch stdout like 'Submitted batch job 12345'.
+
+    Multi-cluster SLURM prints 'Submitted batch job 12345 on cluster x',
+    so take the numeric ID rather than the last token.
+    """
+    match = re.search(r"Submitted batch job (\d+)", stdout)
+    if match:
+        return match.group(1)
     raise ValueError(f"Cannot parse sbatch output: {stdout!r}")
 
 
@@ -92,7 +104,13 @@ def submit_job(
     """
     port = random_port()
     token = generate_token()
-    connection_file = str(config.CONNECTION_DIR / f"jupyter-{port}.conn")
+    # Unique per submission (not just per port) so a stale file from an
+    # earlier job that drew the same port can never be read as this job's
+    # connection info; also remove any leftover at the same path.
+    connection_file = str(
+        config.CONNECTION_DIR / f"jupyter-{port}-{token[:8]}.conn"
+    )
+    Path(connection_file).unlink(missing_ok=True)
 
     script_content = render_slurm_script(
         port=port,
@@ -131,6 +149,17 @@ def wait_for_job_running(job_id: str, timeout: int = 120) -> str:
             capture_output=True,
             text=True,
         )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            if "Invalid job id" in stderr:
+                raise RuntimeError(
+                    f"Job {job_id} disappeared from queue (may have failed)"
+                )
+            # squeue itself failed (e.g. controller timeout) — state is
+            # unknown, keep polling rather than declaring the job dead
+            logger.warning("squeue failed while waiting for job %s: %s", job_id, stderr)
+            time.sleep(3)
+            continue
         stdout = result.stdout.strip()
         if not stdout:
             # Job no longer in queue — may have failed
@@ -165,28 +194,69 @@ def wait_for_connection_file(
 
 
 def cancel_job(job_id: str) -> None:
-    """Cancel a SLURM job."""
-    subprocess.run(["scancel", job_id], capture_output=True, text=True)
+    """Cancel a SLURM job. Raises SlurmCommandError if scancel fails."""
+    result = subprocess.run(["scancel", job_id], capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "Invalid job id" in stderr:
+            return  # job already gone — nothing to cancel
+        raise SlurmCommandError(
+            f"scancel {job_id} failed (rc={result.returncode}): {stderr}"
+        )
 
 
-def get_job_state(job_id: str) -> str:
-    """Get current state of a SLURM job."""
-    result = subprocess.run(
-        ["squeue", "-j", job_id, "-h", "-o", "%T"],
-        capture_output=True,
-        text=True,
+def get_job_state(job_id: str, retries: int = 3) -> str:
+    """Get current state of a SLURM job ('' if the job is not in the queue).
+
+    A nonzero squeue exit code means the answer is UNKNOWN (e.g. transient
+    slurmctld timeout), not that the job is gone — retry briefly, then
+    raise SlurmCommandError so callers don't mistake a controller hiccup
+    for a finished job.
+    """
+    last_err = ""
+    for attempt in range(retries):
+        result = subprocess.run(
+            ["squeue", "-j", job_id, "-h", "-o", "%T"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        last_err = result.stderr.strip()
+        if "Invalid job id" in last_err:
+            return ""  # squeue rejects unknown/expired job IDs with rc=1
+        if attempt < retries - 1:
+            time.sleep(2)
+    raise SlurmCommandError(
+        f"squeue failed for job {job_id} after {retries} attempts: {last_err}"
     )
-    return result.stdout.strip()
 
 
 def is_job_running(job_id: str) -> bool:
-    """Quick check if job is in RUNNING state."""
-    return get_job_state(job_id) == "RUNNING"
+    """Quick check if job is in RUNNING state.
+
+    On squeue failure the state is unknown — report True (assume still
+    running) so polling loops keep waiting instead of declaring a live
+    job dead and cancelling/resubmitting it.
+    """
+    try:
+        return get_job_state(job_id) == "RUNNING"
+    except SlurmCommandError as e:
+        logger.warning("squeue unavailable, assuming job %s still running: %s", job_id, e)
+        return True
 
 
 def is_job_alive(job_id: str) -> bool:
-    """Check if job is in any active SLURM state (PENDING, RUNNING, etc.)."""
-    return get_job_state(job_id) != ""
+    """Check if job is in any active SLURM state (PENDING, RUNNING, etc.).
+
+    On squeue failure the state is unknown — report True (assume alive)
+    so callers resume waiting rather than submitting a duplicate job.
+    """
+    try:
+        return get_job_state(job_id) != ""
+    except SlurmCommandError as e:
+        logger.warning("squeue unavailable, assuming job %s alive: %s", job_id, e)
+        return True
 
 
 def cleanup_connection_file(path: str | Path) -> None:

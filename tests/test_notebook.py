@@ -241,3 +241,116 @@ class TestSaveLoadRoundtrip:
         assert nb.cells[0].source == "import numpy as np"
         assert nb.cells[1].source == "# Analysis"
         assert nb.cells[2].source == "result = np.array([1, 2, 3])"
+
+
+class TestCreateNotebookNoOverwrite:
+    def test_same_name_gets_unique_path(self, nb_manager, tmp_path):
+        p1 = nb_manager.create_notebook("analysis", tmp_path)
+        p2 = nb_manager.create_notebook("analysis", tmp_path)
+        p3 = nb_manager.create_notebook("analysis", tmp_path)
+        assert p1 != p2 != p3
+        assert p2.stem == "analysis_2"
+        assert p3.stem == "analysis_3"
+
+    def test_existing_content_preserved(self, nb_manager, tmp_path):
+        p1 = nb_manager.create_notebook("precious", tmp_path)
+        nb_manager.add_code_cell(p1, "important_result = 42")
+        nb_manager.create_notebook("precious", tmp_path)
+        assert nb_manager.get_cell_count(p1) == 1
+        assert nb_manager.get_cell_source(p1, 0) == "important_result = 42"
+
+
+class TestNonCodeCellGuards:
+    def test_edit_cell_rejects_markdown(self, nb_manager, nb_path):
+        nb_manager.add_markdown_cell(nb_path, "# heading")
+        with pytest.raises(ValueError, match="markdown"):
+            nb_manager.edit_cell(nb_path, 0, "x = 1")
+
+    def test_update_outputs_rejects_markdown(self, nb_manager, nb_path):
+        nb_manager.add_markdown_cell(nb_path, "# heading")
+        with pytest.raises(ValueError, match="markdown"):
+            nb_manager.update_cell_outputs(
+                nb_path, 0, [{"type": "text", "content": "x"}]
+            )
+
+    def test_edit_markdown_still_works(self, nb_manager, nb_path):
+        nb_manager.add_markdown_cell(nb_path, "# old")
+        nb_manager.edit_markdown_cell(nb_path, 0, "# new")
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0].source == "# new"
+        # Notebook must validate (no stray outputs on the markdown cell)
+        nbformat.validate(nb)
+
+
+class TestCellIdTracking:
+    def test_get_cell_id(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "x = 1")
+        cell_id = nb_manager.get_cell_id(nb_path, 0)
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[0]["id"] == cell_id
+
+    def test_update_by_id_survives_index_shift(self, nb_manager, nb_path):
+        """Outputs reach the right cell even after cells are inserted
+        before it (the scenario where positional indices go stale)."""
+        nb_manager.add_code_cell(nb_path, "target = 1")
+        cell_id = nb_manager.get_cell_id(nb_path, 0)
+        # Shift the target cell from index 0 to index 2
+        nb_manager.add_code_cell(nb_path, "inserted_a", index=0)
+        nb_manager.add_markdown_cell(nb_path, "# inserted_b", index=0)
+
+        idx = nb_manager.update_cell_outputs_by_id(
+            nb_path, cell_id, [{"type": "text", "content": "out\n"}]
+        )
+        assert idx == 2
+        nb = nb_manager.get_notebook(nb_path)
+        assert nb.cells[2].source == "target = 1"
+        assert len(nb.cells[2].outputs) == 1
+        assert len(nb.cells[1].outputs) == 0  # the impostor code cell stays clean
+
+    def test_update_by_id_missing_cell(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(nb_path, "x = 1")
+        with pytest.raises(KeyError):
+            nb_manager.update_cell_outputs_by_id(
+                nb_path, "no_such_id", [{"type": "text", "content": "x"}]
+            )
+
+    def test_update_by_id_rejects_markdown(self, nb_manager, nb_path):
+        nb_manager.add_markdown_cell(nb_path, "# md")
+        cell_id = nb_manager.get_cell_id(nb_path, 0)
+        with pytest.raises(ValueError):
+            nb_manager.update_cell_outputs_by_id(
+                nb_path, cell_id, [{"type": "text", "content": "x"}]
+            )
+
+
+class TestOutputConversionFidelity:
+    def test_stderr_stream_name_preserved(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(
+            nb_path,
+            "warn",
+            outputs=[{"type": "text", "content": "warning!\n", "name": "stderr"}],
+        )
+        nb = nb_manager.get_notebook(nb_path)
+        out = nb.cells[0].outputs[0]
+        assert out["output_type"] == "stream"
+        assert out["name"] == "stderr"
+
+    def test_default_stream_is_stdout(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(
+            nb_path, "p", outputs=[{"type": "text", "content": "hi\n"}]
+        )
+        out = nb_manager.get_notebook(nb_path).cells[0].outputs[0]
+        assert out["output_type"] == "stream"
+        assert out["name"] == "stdout"
+
+    def test_execute_result_semantics(self, nb_manager, nb_path):
+        nb_manager.add_code_cell(
+            nb_path,
+            "1 + 1",
+            outputs=[{"type": "text", "content": "2", "result": True}],
+        )
+        nb = nb_manager.get_notebook(nb_path)
+        out = nb.cells[0].outputs[0]
+        assert out["output_type"] == "execute_result"
+        assert out["data"]["text/plain"] == "2"
+        nbformat.validate(nb)

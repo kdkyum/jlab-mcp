@@ -47,24 +47,26 @@ echo "HOSTNAME=$(hostname)" > ~/.jlab-mcp/connections/jupyter-18432.conn
 echo "PORT=18432" >> ...
 echo "TOKEN=a3f8b2c1..." >> ...
 
-jupyter lab --no-browser --ip=0.0.0.0 --port=18432 --ServerApp.token="$JUPYTER_TOKEN" ...
+jupyter lab --no-browser --ip=0.0.0.0 --port=18432 ...
+# (token comes from the exported JUPYTER_TOKEN env var — never argv,
+#  which is world-readable via /proc/<pid>/cmdline on shared nodes)
 ```
 
 This is submitted via `sbatch`.
 
-#### 1c. Wait for SLURM Job (up to 5 min)
+#### 1c. Wait for SLURM Job (up to `JLAB_MCP_QUEUE_TIMEOUT`, default 5 min)
 
 ```
 SLURM job 24215408 submitted, waiting in queue...
 ```
 
-Polls `squeue` every 3 seconds until the job state is `RUNNING`.
+Polls `squeue` every 3 seconds until the job state is `RUNNING`. If the queue is slow, the wait times out but the job **stays queued** and the status stays `pending` — rerun `jlab-mcp start` to resume waiting (the job is never cancelled just for being queued).
 
-#### 1d. Wait for Connection File (up to 2 min)
+#### 1d. Wait for Connection File (up to `JLAB_MCP_READY_TIMEOUT`, default 2 min)
 
-The SLURM script on the compute node writes hostname/port/token to the shared filesystem. The login node polls until the file appears.
+The SLURM script on the compute node writes hostname/port/token to the shared filesystem. The login node polls until the file appears. Once the server is ready, the connection file is deleted (the token then lives only in the 0600 status file). If this times out while the job is running, the job is cancelled so it doesn't burn its allocation unreachable.
 
-#### 1e. Wait for JupyterLab (up to 2 min)
+#### 1e. Wait for JupyterLab (up to `JLAB_MCP_READY_TIMEOUT`, default 2 min)
 
 ```python
 requests.get("http://ravg1011:18432/api/status", headers={"Authorization": "token a3f8b2c1..."})
@@ -113,8 +115,9 @@ token = secrets.token_hex(24)
 ```python
 subprocess.Popen([sys.executable, "-m", "jupyter", "lab",
     "--ip=127.0.0.1", "--port=18432",
-    "--IdentityProvider.token=a3f8b2c1...",
-    "--no-browser", "--notebook-dir=./notebooks"])
+    "--no-browser", "--ServerApp.port_retries=0",
+    "--notebook-dir=<project root>"],          # JLAB_MCP_SERVER_ROOT_DIR
+    env={**os.environ, "JUPYTER_TOKEN": token})  # token via env, not argv
 ```
 
 Logs are written to `~/.jlab-mcp/logs/jupyter-local-18432.log`.
@@ -150,7 +153,7 @@ The MCP server reads this same status file to connect, regardless of mode.
 
 ## 2. MCP Server Connects
 
-When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 11 tools + 1 resource.
+When Claude Code starts, it reads your `.mcp.json` and spawns `jlab-mcp` (no args = MCP server mode). The MCP server communicates with Claude Code over **stdin/stdout pipes** and advertises 13 tools + 1 resource.
 
 The MCP server **does not manage SLURM** — it only reads the status file written by `jlab-mcp start` to find the running JupyterLab.
 
@@ -257,7 +260,7 @@ Without this detection, a kernel death would cause the WebSocket loop to hang si
 ### 4d. Process Outputs
 
 - **Text** -> returned as string in a list
-- **Images** -> decoded, resized to 512px max, returned as FastMCP `Image` object -> becomes MCP `ImageContent` -> **Claude Code sees the actual plot**
+- **Images** -> decoded, resized to 2576px max on the long edge, returned as FastMCP `Image` object -> becomes MCP `ImageContent` -> **Claude Code sees the actual plot**
 - **Errors** -> traceback returned as string in a list
 
 ### 4e. Save to Notebook
@@ -282,7 +285,7 @@ The **kernel** is stopped, but the **SLURM job stays alive** for other sessions.
 
 ### 5b. User Exits Claude Code
 
-When Claude Code terminates, it kills the MCP server process. The MCP server shuts down active kernels but **does not cancel the SLURM job**. The JupyterLab instance keeps running for the next Claude Code session.
+When Claude Code terminates, it kills the MCP server process. Kernels keep running on the JupyterLab server (the MCP server has no shutdown hook), and the SLURM job is untouched. The next `start_new_notebook` shuts down all leftover kernels, and `jlab-mcp stop` tears everything down. The JupyterLab instance keeps running for the next Claude Code session.
 
 ### 5c. `jlab-mcp stop` — Stops JupyterLab
 
@@ -348,7 +351,7 @@ MCP Server starts
   |   save cell ----------------------> notebook.ipynb
   |
   |-- User exits Claude Code
-  |   MCP server stops (kernels cleaned up, SLURM job stays alive)
+  |   MCP server stops (kernels keep running, SLURM job stays alive)
   v
 
 
@@ -397,7 +400,7 @@ MCP Server starts
   |   save cell --> notebook.ipynb
   |
   |-- User exits Claude Code
-  |   MCP server stops (kernels cleaned up, JupyterLab stays alive)
+  |   MCP server stops (kernels keep running, JupyterLab stays alive)
   v
 
 

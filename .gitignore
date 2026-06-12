@@ -12,6 +12,10 @@ wheels/
 # Testing
 .pytest_cache/
 
+# Notebook storage (auto-created by config.py in the project dir;
+# integration tests generate test_*.ipynb here)
+notebooks/
+
 # IDE
 .vscode/
 .idea/

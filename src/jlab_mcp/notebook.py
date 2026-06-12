@@ -4,7 +4,6 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Callable
 
 import nbformat
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
@@ -55,11 +54,19 @@ class NotebookManager:
         return index
 
     def create_notebook(self, name: str, directory: str | Path) -> Path:
-        """Create an empty .ipynb notebook. Returns the path."""
+        """Create an empty .ipynb notebook. Returns the path.
+
+        Never overwrites: if {name}.ipynb already exists, appends _2, _3, ...
+        (same collision handling as copy_notebook).
+        """
         name = _sanitize_filename(name)
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         nb_path = directory / f"{name}.ipynb"
+        counter = 2
+        while nb_path.exists():
+            nb_path = directory / f"{name}_{counter}.ipynb"
+            counter += 1
 
         nb = new_notebook()
         nb.metadata.update(
@@ -121,12 +128,20 @@ class NotebookManager:
         new_code: str,
         outputs: list[dict] | None = None,
     ) -> int:
-        """Replace cell content and outputs. Returns the resolved cell index."""
+        """Replace a code cell's content and outputs. Returns the resolved cell index."""
         nb = self.get_notebook(nb_path)
         cell_index = self._resolve_cell_index(nb, cell_index)
-        nb.cells[cell_index].source = new_code
+        cell = nb.cells[cell_index]
+        if cell.cell_type != "code":
+            # 'outputs' is only valid on code cells; writing it to a markdown
+            # cell produces a schema-invalid notebook
+            raise ValueError(
+                f"Cell {cell_index} is a {cell.cell_type} cell, not a code "
+                f"cell (use edit_markdown for markdown cells)"
+            )
+        cell.source = new_code
         if outputs is not None:
-            nb.cells[cell_index].outputs = self._convert_outputs(outputs)
+            cell.outputs = self._convert_outputs(outputs)
         self.save_notebook(nb_path, nb)
         return cell_index
 
@@ -148,9 +163,46 @@ class NotebookManager:
         """Update only the outputs of a cell (source unchanged). Returns resolved index."""
         nb = self.get_notebook(nb_path)
         cell_index = self._resolve_cell_index(nb, cell_index)
+        if nb.cells[cell_index].cell_type != "code":
+            raise ValueError(
+                f"Cell {cell_index} is a {nb.cells[cell_index].cell_type} "
+                f"cell; only code cells have outputs"
+            )
         nb.cells[cell_index].outputs = self._convert_outputs(outputs)
         self.save_notebook(nb_path, nb)
         return cell_index
+
+    def get_cell_id(self, nb_path: Path | str, cell_index: int) -> str:
+        """Read a cell's nbformat id by index. Supports negative indexing.
+
+        Cell ids are stable across inserts/deletes of other cells, unlike
+        positional indices — use them to refer to a cell across a long
+        kernel execution.
+        """
+        nb = self.get_notebook(nb_path)
+        cell_index = self._resolve_cell_index(nb, cell_index)
+        return nb.cells[cell_index]["id"]
+
+    def update_cell_outputs_by_id(
+        self, nb_path: Path | str, cell_id: str, outputs: list[dict]
+    ) -> int:
+        """Update the outputs of the cell with the given nbformat id.
+
+        Returns the cell's current index. Raises KeyError if no cell with
+        that id exists (e.g. it was deleted while the code was executing).
+        """
+        nb = self.get_notebook(nb_path)
+        for i, cell in enumerate(nb.cells):
+            if cell.get("id") == cell_id:
+                if cell.cell_type != "code":
+                    raise ValueError(
+                        f"Cell {cell_id} is a {cell.cell_type} cell; "
+                        f"only code cells have outputs"
+                    )
+                cell.outputs = self._convert_outputs(outputs)
+                self.save_notebook(nb_path, nb)
+                return i
+        raise KeyError(f"No cell with id {cell_id!r} in {nb_path}")
 
     def get_code_cells(self, nb_path: Path | str) -> list[dict]:
         """Return info for all code cells.
@@ -239,43 +291,28 @@ class NotebookManager:
         shutil.copy2(src, dst)
         return dst
 
-    def restore_notebook(
-        self,
-        nb_path: Path | str,
-        kernel_execute_fn: Callable[[str], list[dict]],
-    ) -> list[str]:
-        """Re-execute all code cells to restore kernel state.
-
-        Returns list of error messages (empty if all succeeded).
-        """
-        nb = self.get_notebook(nb_path)
-        errors: list[str] = []
-        for i, cell in enumerate(nb.cells):
-            if cell.cell_type != "code" or not cell.source.strip():
-                continue
-            outputs = kernel_execute_fn(cell.source)
-            cell.outputs = self._convert_outputs(outputs)
-            for out in outputs:
-                if out.get("type") == "error":
-                    errors.append(
-                        f"Cell {i}: {out.get('ename', 'Error')}: "
-                        f"{out.get('evalue', '')}"
-                    )
-        self.save_notebook(nb_path, nb)
-        return errors
-
     def _convert_outputs(self, outputs: list[dict]) -> list:
         """Convert our output dicts to nbformat output objects."""
         nb_outputs = []
         for out in outputs:
             if out["type"] == "text":
-                nb_outputs.append(
-                    nbformat.v4.new_output(
-                        output_type="stream",
-                        name="stdout",
-                        text=out["content"],
+                if out.get("result"):
+                    # Expression value (Out[n]) — keep execute_result semantics
+                    nb_outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="execute_result",
+                            data={"text/plain": out["content"]},
+                            execution_count=None,
+                        )
                     )
-                )
+                else:
+                    nb_outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="stream",
+                            name=out.get("name", "stdout"),
+                            text=out["content"],
+                        )
+                    )
             elif out["type"] == "image":
                 nb_outputs.append(
                     nbformat.v4.new_output(

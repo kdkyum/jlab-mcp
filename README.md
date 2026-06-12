@@ -44,7 +44,9 @@ The SLURM job activates `.venv` in the **current working directory**. Set up you
 cd /shared/fs/my-project
 uv venv
 uv pip install jupyterlab ipykernel matplotlib numpy
-uv pip install torch --index-url https://download.pytorch.org/whl/cu126  # GPU support
+uv pip install torch --index-url https://download.pytorch.org/whl/cu126   # NVIDIA GPUs
+# AMD GPUs (e.g. MI300A): use the ROCm wheels instead
+# uv pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
 ```
 
 ## Usage
@@ -99,6 +101,7 @@ All settings are configurable via environment variables. No values are hardcoded
 |---|---|---|
 | `JLAB_MCP_DIR` | `~/.jlab-mcp` | Base working directory |
 | `JLAB_MCP_NOTEBOOK_DIR` | `./notebooks` | Notebook storage (relative to cwd) |
+| `JLAB_MCP_SERVER_ROOT_DIR` | cwd | JupyterLab root directory (what the file browser sees) |
 | `JLAB_MCP_LOG_DIR` | `~/.jlab-mcp/logs` | SLURM job logs |
 | `JLAB_MCP_STATUS_DIR` | `~/.jlab-mcp/servers/{name}-{hash}` | Per-project status directory (auto-derived from cwd) |
 | `JLAB_MCP_CONNECTION_DIR` | `~/.jlab-mcp/connections` | Connection info files |
@@ -108,6 +111,8 @@ All settings are configurable via environment variables. No values are hardcoded
 | `JLAB_MCP_SLURM_MEM` | `32000` | Memory in MB |
 | `JLAB_MCP_SLURM_TIME` | `4:00:00` | Wall clock time limit |
 | `JLAB_MCP_SLURM_MODULES` | *(empty)* | Space-separated modules to load (e.g. `cuda/12.6`) |
+| `JLAB_MCP_QUEUE_TIMEOUT` | `300` | Seconds `start` waits for the job to leave the queue. On timeout the job **stays queued** — rerun `jlab-mcp start` to resume waiting |
+| `JLAB_MCP_READY_TIMEOUT` | `120` | Seconds to wait for JupyterLab once the job is running. On timeout the job is cancelled |
 | `JLAB_MCP_PORT_MIN` | `18000` | Port range lower bound |
 | `JLAB_MCP_PORT_MAX` | `19000` | Port range upper bound |
 | `JLAB_MCP_RUN_MODE` | *(auto)* | `local` or `slurm` (auto-detects based on `sbatch` availability) |
@@ -149,15 +154,17 @@ The MCP server uses the working directory to find `.venv` for the compute node. 
 
 | Tool | Description |
 |---|---|
-| `start_new_notebook` | Start kernel on shared server, create empty notebook |
-| `start_notebook` | Attach fresh kernel to existing notebook, returns cell contents |
+| `start_new_notebook` | Start kernel on shared server, create empty notebook (never overwrites — duplicate names get `_2`, `_3`, …). Shuts down all previous kernels/sessions first |
+| `start_notebook` | Open an existing notebook, reusing its live kernel if one exists (state preserved); otherwise starts a fresh kernel. Returns cell contents |
 | `execute_code` | Insert new code cell and execute it (supports positional insertion) |
-| `edit_cell` | Edit cell source only, no execution (clears stale outputs) |
+| `edit_cell` | Edit code cell source only, no execution (clears stale outputs) |
 | `run_cell` | Run existing cell without modifying its source |
 | `add_markdown` | Add markdown cell to notebook (supports positional insertion) |
+| `edit_markdown` | Edit an existing markdown cell's content |
+| `delete_cell` | Delete a cell (code or markdown) by index |
 | `execute_scratch` | Run code on a utility kernel (no notebook save, no session state) |
 | `interrupt_kernel` | Interrupt running execution without shutting down the session |
-| `shutdown_session` | Stop kernel (SLURM job stays alive for other sessions) |
+| `shutdown_session` | Stop kernel (SLURM job stays alive) |
 | `ping` | Lightweight health check — verify JupyterLab is reachable (no kernel needed) |
 | `check_resources` | Check CPU, memory, and GPU usage on the compute node (no session needed) |
 
@@ -165,8 +172,8 @@ Resource: `jlab-mcp://server/status` — returns shared server info and active s
 
 ### Session Lifecycle
 
-- **`start_new_notebook`**: Creates a new kernel and a new notebook
-- **`start_notebook`**: Attaches a fresh kernel to an existing notebook
+- **`start_new_notebook`**: Creates a new kernel and a new notebook. Any previously running kernels/sessions are shut down (one active session at a time)
+- **`start_notebook`**: Opens an existing notebook. If a session with a live kernel already exists for it, that session is returned with all state preserved; otherwise a fresh kernel is started
 - **Restart kernel**: `shutdown_session` + `start_notebook(same_path)` = fresh kernel on same notebook
 - **`shutdown_session`**: Kills the kernel only. The SLURM job keeps running.
 - **SLURM job dies**: Next tool call returns an error. Run `jlab-mcp start` to restart.
@@ -175,7 +182,7 @@ Resource: `jlab-mcp://server/status` — returns shared server info and active s
 
 ```bash
 # Unit tests (no SLURM needed)
-uv run python -m pytest tests/test_slurm.py tests/test_notebook.py tests/test_image_utils.py -v
+uv run python -m pytest tests/ --ignore=tests/test_tools.py -v
 
 # Integration tests (requires running `jlab-mcp start` first)
 uv run python -m pytest tests/test_tools.py -v -s --timeout=600

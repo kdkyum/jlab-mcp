@@ -1,15 +1,28 @@
-"""Unit tests for slurm.py — parsing logic only, no SLURM needed."""
+"""Unit tests for slurm.py — parsing and error handling, no SLURM needed."""
 
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from jlab_mcp.slurm import (
+    SlurmCommandError,
+    cancel_job,
+    get_job_state,
+    is_job_alive,
+    is_job_running,
     parse_connection_file,
     parse_sbatch_output,
     parse_squeue_output,
 )
+
+
+def _completed(rc: int, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(
+        args=[], returncode=rc, stdout=stdout, stderr=stderr
+    )
 
 
 class TestParseSbatchOutput:
@@ -22,6 +35,14 @@ class TestParseSbatchOutput:
     def test_trailing_whitespace(self):
         assert parse_sbatch_output("Submitted batch job 12345\n") == "12345"
 
+    def test_multi_cluster_output(self):
+        """Federated SLURM appends 'on cluster <name>' — the job ID is not
+        the last token."""
+        assert (
+            parse_sbatch_output("Submitted batch job 12345 on cluster viper")
+            == "12345"
+        )
+
     def test_malformed_output(self):
         with pytest.raises(ValueError):
             parse_sbatch_output("Error: something went wrong")
@@ -29,6 +50,77 @@ class TestParseSbatchOutput:
     def test_empty_output(self):
         with pytest.raises(ValueError):
             parse_sbatch_output("")
+
+
+class TestGetJobState:
+    def test_returns_state(self):
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(0, "RUNNING\n")):
+            assert get_job_state("123") == "RUNNING"
+
+    def test_empty_with_rc_zero_means_gone(self):
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(0, "")):
+            assert get_job_state("123") == ""
+
+    def test_invalid_job_id_means_gone(self):
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(1, "", "slurm_load_jobs error: Invalid job id specified")):
+            assert get_job_state("123") == ""
+
+    def test_transient_failure_then_success(self):
+        responses = iter([
+            _completed(1, "", "slurm_load_jobs error: Socket timed out"),
+            _completed(0, "PENDING\n"),
+        ])
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   side_effect=lambda *a, **k: next(responses)), \
+             patch("jlab_mcp.slurm.time.sleep"):
+            assert get_job_state("123") == "PENDING"
+
+    def test_persistent_failure_raises(self):
+        """A controller outage must NOT look like 'job gone'."""
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(1, "", "Socket timed out")), \
+             patch("jlab_mcp.slurm.time.sleep"):
+            with pytest.raises(SlurmCommandError):
+                get_job_state("123")
+
+
+class TestJobAliveFailSafe:
+    def test_is_job_running_assumes_alive_on_squeue_failure(self):
+        with patch("jlab_mcp.slurm.get_job_state",
+                   side_effect=SlurmCommandError("squeue down")):
+            assert is_job_running("123") is True
+
+    def test_is_job_alive_assumes_alive_on_squeue_failure(self):
+        with patch("jlab_mcp.slurm.get_job_state",
+                   side_effect=SlurmCommandError("squeue down")):
+            assert is_job_alive("123") is True
+
+    def test_is_job_alive_false_when_gone(self):
+        with patch("jlab_mcp.slurm.get_job_state", return_value=""):
+            assert is_job_alive("123") is False
+
+
+class TestCancelJob:
+    def test_success(self):
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(0)):
+            cancel_job("123")  # no raise
+
+    def test_already_gone_is_ok(self):
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(1, "", "scancel: error: Invalid job id 123")):
+            cancel_job("123")  # no raise
+
+    def test_failure_raises(self):
+        """scancel failing must surface — silently 'cancelling' leaves an
+        untracked job burning its allocation."""
+        with patch("jlab_mcp.slurm.subprocess.run",
+                   return_value=_completed(1, "", "Connection refused")):
+            with pytest.raises(SlurmCommandError):
+                cancel_job("123")
 
 
 class TestParseSqueueOutput:
