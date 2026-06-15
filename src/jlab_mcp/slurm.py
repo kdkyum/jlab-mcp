@@ -36,6 +36,22 @@ def _build_module_commands(modules_str: str) -> str:
     return "\n".join(lines)
 
 
+# Bind addresses that accept connections on every interface — the node has no
+# single "the" IP, so the connection file must advertise its resolvable hostname.
+_WILDCARD_IPS = {"0.0.0.0", "::", ""}
+
+
+def _advertised_host_expr(bind_ip: str) -> str:
+    """Shell expression written as HOSTNAME in the connection file.
+
+    For a wildcard bind, the MCP server (on the login node) reaches the job by
+    the node's hostname, so emit `$(hostname)` for the job script to expand. For
+    a concrete bind IP, advertise that exact IP so the client connects to the
+    interface we bound.
+    """
+    return "$(hostname)" if bind_ip.strip() in _WILDCARD_IPS else bind_ip.strip()
+
+
 def render_slurm_script(
     port: int,
     token: str,
@@ -45,6 +61,7 @@ def render_slurm_script(
     project_dir: str | None = None,
 ) -> str:
     template = config.get_template_content()
+    bind_ip = config.SLURM_BIND_IP
     return template.format(
         port=port,
         token=token,
@@ -58,6 +75,8 @@ def render_slurm_script(
         mem=config.SLURM_MEM,
         time=config.SLURM_TIME,
         module_commands=_build_module_commands(config.SLURM_MODULES),
+        bind_ip=bind_ip,
+        host_expr=_advertised_host_expr(bind_ip),
     )
 
 

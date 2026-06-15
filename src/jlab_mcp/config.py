@@ -50,6 +50,13 @@ SLURM_CPUS = _get_int("JLAB_MCP_SLURM_CPUS", 4)
 SLURM_MEM = _get_int("JLAB_MCP_SLURM_MEM", 32000)
 SLURM_TIME = _get_str("JLAB_MCP_SLURM_TIME", "4:00:00")
 
+# Address JupyterLab binds to on the compute node (the `--ip` flag). The
+# default 0.0.0.0 listens on all interfaces and the connection file advertises
+# the node's `$(hostname)` (resolvable from the login node where the MCP server
+# runs). Set a concrete IP to bind a single interface — that exact IP is then
+# advertised so the MCP server connects to the interface we bound.
+SLURM_BIND_IP = _get_str("JLAB_MCP_SLURM_BIND_IP", "0.0.0.0")
+
 # How long `jlab-mcp start` waits for the job to leave the queue before
 # giving up (the job stays queued and `jlab-mcp start` resumes waiting).
 QUEUE_TIMEOUT = _get_int("JLAB_MCP_QUEUE_TIMEOUT", 300)

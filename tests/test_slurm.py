@@ -9,6 +9,7 @@ import pytest
 
 from jlab_mcp.slurm import (
     SlurmCommandError,
+    _advertised_host_expr,
     cancel_job,
     get_job_state,
     is_job_alive,
@@ -16,6 +17,7 @@ from jlab_mcp.slurm import (
     parse_connection_file,
     parse_sbatch_output,
     parse_squeue_output,
+    render_slurm_script,
 )
 
 
@@ -181,3 +183,35 @@ class TestParseConnectionFile:
         conn_file.write_text("\nHOSTNAME=ravg1001\n\nPORT=18500\n\nTOKEN=abc123\n\n")
         result = parse_connection_file(conn_file)
         assert len(result) == 3
+
+
+class TestAdvertisedHostExpr:
+    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "", "  "])
+    def test_wildcard_advertises_hostname(self, wildcard):
+        assert _advertised_host_expr(wildcard) == "$(hostname)"
+
+    def test_concrete_ip_advertises_itself(self):
+        assert _advertised_host_expr("10.0.0.5") == "10.0.0.5"
+
+    def test_concrete_ip_is_stripped(self):
+        assert _advertised_host_expr("  10.0.0.5  ") == "10.0.0.5"
+
+
+class TestRenderSlurmScript:
+    def _render(self, bind_ip):
+        with patch("jlab_mcp.config.SLURM_BIND_IP", bind_ip):
+            return render_slurm_script(
+                port=18500, token="abc123", connection_file="/tmp/x.conn"
+            )
+
+    def test_default_binds_all_interfaces(self):
+        script = self._render("0.0.0.0")
+        assert "--ip=0.0.0.0" in script
+        # Connection file advertises the node hostname (shell-expanded in-job)
+        assert "HOSTNAME=$(hostname)" in script
+
+    def test_concrete_ip_binds_and_advertises_itself(self):
+        script = self._render("10.0.0.5")
+        assert "--ip=10.0.0.5" in script
+        assert "HOSTNAME=10.0.0.5" in script
+        assert "$(hostname)" not in script

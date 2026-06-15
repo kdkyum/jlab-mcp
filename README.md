@@ -110,6 +110,7 @@ All settings are configurable via environment variables. No values are hardcoded
 | `JLAB_MCP_SLURM_CPUS` | `4` | CPUs per task |
 | `JLAB_MCP_SLURM_MEM` | `32000` | Memory in MB |
 | `JLAB_MCP_SLURM_TIME` | `4:00:00` | Wall clock time limit |
+| `JLAB_MCP_SLURM_BIND_IP` | `0.0.0.0` | Address JupyterLab binds to on the compute node. Default listens on all interfaces and advertises the node's `$(hostname)`; a concrete IP binds that one interface and advertises that exact IP |
 | `JLAB_MCP_SLURM_MODULES` | *(empty)* | Space-separated modules to load (e.g. `cuda/12.6`) |
 | `JLAB_MCP_QUEUE_TIMEOUT` | `300` | Seconds `start` waits for the job to leave the queue. On timeout the job **stays queued** — rerun `jlab-mcp start` to resume waiting |
 | `JLAB_MCP_READY_TIMEOUT` | `120` | Seconds to wait for JupyterLab once the job is running. On timeout the job is cancelled |
