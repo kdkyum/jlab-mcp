@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from jlab_mcp.local import (
+    _local_connect_host,
     _pid_is_jupyter,
     is_local_running,
     start_jupyter_local,
@@ -86,6 +87,39 @@ class TestStartJupyterLocal:
         assert not any(token in arg for arg in cmd)
         # Port collisions must fail fast, not silently rebind
         assert "--ServerApp.port_retries=0" in cmd
+
+    def test_default_binds_all_interfaces_connects_loopback(self):
+        """Default 0.0.0.0 binds every interface, but the same-host server
+        must dial loopback (a wildcard is not a valid connect target)."""
+        fake_proc = MagicMock()
+        fake_proc.pid = 1
+        with patch("jlab_mcp.config.LOCAL_BIND_IP", "0.0.0.0"), \
+             patch("jlab_mcp.local.subprocess.Popen",
+                   return_value=fake_proc) as mock_popen:
+            _, connect_host, _, _ = start_jupyter_local()
+        cmd = mock_popen.call_args.args[0]
+        assert "--ip=0.0.0.0" in cmd
+        assert connect_host == "127.0.0.1"
+
+    def test_concrete_bind_ip_used_for_bind_and_connect(self):
+        fake_proc = MagicMock()
+        fake_proc.pid = 1
+        with patch("jlab_mcp.config.LOCAL_BIND_IP", "192.168.1.50"), \
+             patch("jlab_mcp.local.subprocess.Popen",
+                   return_value=fake_proc) as mock_popen:
+            _, connect_host, _, _ = start_jupyter_local()
+        cmd = mock_popen.call_args.args[0]
+        assert "--ip=192.168.1.50" in cmd
+        assert connect_host == "192.168.1.50"
+
+
+class TestLocalConnectHost:
+    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "", "  "])
+    def test_wildcard_connects_via_loopback(self, wildcard):
+        assert _local_connect_host(wildcard) == "127.0.0.1"
+
+    def test_concrete_ip_connects_to_itself(self):
+        assert _local_connect_host("192.168.1.50") == "192.168.1.50"
 
 
 class TestDetectRunMode:

@@ -50,6 +50,12 @@ SLURM_CPUS = _get_int("JLAB_MCP_SLURM_CPUS", 4)
 SLURM_MEM = _get_int("JLAB_MCP_SLURM_MEM", 32000)
 SLURM_TIME = _get_str("JLAB_MCP_SLURM_TIME", "4:00:00")
 
+# Bind addresses that accept connections on every interface rather than naming
+# one. JupyterLab can listen on these, but the MCP server can't reliably
+# *connect* to a wildcard, so a concrete reachable host is advertised instead:
+# the node `$(hostname)` in SLURM mode, loopback in local mode.
+WILDCARD_BIND_IPS = {"0.0.0.0", "::", ""}
+
 # Address JupyterLab binds to on the compute node (the `--ip` flag). The
 # default 0.0.0.0 listens on all interfaces and the connection file advertises
 # the node's `$(hostname)` (resolvable from the login node where the MCP server
@@ -102,10 +108,11 @@ def _detect_run_mode() -> str:
 
 RUN_MODE = _detect_run_mode()
 
-# Local mode bind address. JupyterLab and the MCP server run on the same
-# host in local mode, so loopback is sufficient; set to 0.0.0.0 explicitly
-# if remote access to the JupyterLab UI is needed.
-LOCAL_BIND_IP = _get_str("JLAB_MCP_LOCAL_BIND_IP", "127.0.0.1")
+# Local mode bind address (the `--ip` flag). Default 0.0.0.0 listens on all
+# interfaces, so the JupyterLab UI is reachable from other hosts (or a
+# container/VM host); the MCP server, being on the same machine, still connects
+# over loopback. Set to 127.0.0.1 to restrict JupyterLab to loopback only.
+LOCAL_BIND_IP = _get_str("JLAB_MCP_LOCAL_BIND_IP", "0.0.0.0")
 
 
 def get_template_content() -> str:

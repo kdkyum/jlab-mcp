@@ -36,11 +36,6 @@ def _build_module_commands(modules_str: str) -> str:
     return "\n".join(lines)
 
 
-# Bind addresses that accept connections on every interface — the node has no
-# single "the" IP, so the connection file must advertise its resolvable hostname.
-_WILDCARD_IPS = {"0.0.0.0", "::", ""}
-
-
 def _advertised_host_expr(bind_ip: str) -> str:
     """Shell expression written as HOSTNAME in the connection file.
 
@@ -49,7 +44,9 @@ def _advertised_host_expr(bind_ip: str) -> str:
     a concrete bind IP, advertise that exact IP so the client connects to the
     interface we bound.
     """
-    return "$(hostname)" if bind_ip.strip() in _WILDCARD_IPS else bind_ip.strip()
+    if bind_ip.strip() in config.WILDCARD_BIND_IPS:
+        return "$(hostname)"
+    return bind_ip.strip()
 
 
 def render_slurm_script(

@@ -13,14 +13,30 @@ from jlab_mcp.slurm import generate_token, random_port
 logger = logging.getLogger("jlab-mcp.local")
 
 
+def _local_connect_host(bind_ip: str) -> str:
+    """Address the same-host MCP server uses to reach JupyterLab.
+
+    A wildcard bind (0.0.0.0/::) listens on every interface but is not a valid
+    connect target on every platform, so dial loopback instead. A concrete bind
+    IP is itself reachable.
+    """
+    if bind_ip.strip() in config.WILDCARD_BIND_IPS:
+        return "127.0.0.1"
+    return bind_ip.strip()
+
+
 def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
     """Start JupyterLab as a local subprocess.
 
-    Returns (process, hostname, port, token).
+    Returns (process, connect_host, port, token). The subprocess binds
+    config.LOCAL_BIND_IP (0.0.0.0 by default = all interfaces); connect_host is
+    the loopback/concrete address the same-host MCP server dials — never a
+    wildcard.
     """
     port = random_port()
     token = generate_token()
-    hostname = config.LOCAL_BIND_IP
+    bind_ip = config.LOCAL_BIND_IP
+    connect_host = _local_connect_host(bind_ip)
 
     log_file = config.LOG_DIR / f"jupyter-local-{port}.log"
 
@@ -36,7 +52,7 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
         "-m",
         "jupyter",
         "lab",
-        f"--ip={hostname}",
+        f"--ip={bind_ip}",
         f"--port={port}",
         "--no-browser",
         # Fail fast on a port collision instead of silently binding port+1
@@ -67,8 +83,11 @@ def start_jupyter_local() -> tuple[subprocess.Popen, str, int, str]:
             env=env,
         )
 
-    logger.info(f"Started JupyterLab (PID {proc.pid}) on {hostname}:{port}")
-    return proc, hostname, port, token
+    logger.info(
+        f"Started JupyterLab (PID {proc.pid}) bound to {bind_ip}:{port}, "
+        f"reachable at {connect_host}:{port}"
+    )
+    return proc, connect_host, port, token
 
 
 def _pid_is_jupyter(pid: int) -> bool:

@@ -117,7 +117,7 @@ All settings are configurable via environment variables. No values are hardcoded
 | `JLAB_MCP_PORT_MIN` | `18000` | Port range lower bound |
 | `JLAB_MCP_PORT_MAX` | `19000` | Port range upper bound |
 | `JLAB_MCP_RUN_MODE` | *(auto)* | `local` or `slurm` (auto-detects based on `sbatch` availability) |
-| `JLAB_MCP_LOCAL_BIND_IP` | `127.0.0.1` | Bind address for local mode |
+| `JLAB_MCP_LOCAL_BIND_IP` | `0.0.0.0` | Address JupyterLab binds to in local mode. Default listens on all interfaces (UI reachable from other hosts / a container host); the same-host MCP server still connects over loopback. Set `127.0.0.1` to restrict JupyterLab to loopback only |
 
 ### Example: Cluster with A100 GPUs and CUDA module
 
