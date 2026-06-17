@@ -16,6 +16,10 @@ logger = logging.getLogger("jlab-mcp")
 # considered dead by Claude Code during long-running executions.
 RECV_POLL_INTERVAL = 30
 
+# A dropped WebSocket is recoverable: reconnect and keep listening up to this
+# many times before giving up — never re-sending code that is already running.
+_MAX_RECONNECTS = 3
+
 # Connection errors that indicate a broken WebSocket.
 # WebSocketException covers handshake failures (e.g. WebSocketBadStatusException
 # when the kernel no longer exists) and timeouts, which are not OSErrors.
@@ -61,6 +65,33 @@ def _execution_cancelled_error() -> dict:
         "type": "error",
         "ename": "ExecutionCancelled",
         "evalue": "Execution was cancelled by the user.",
+        "traceback": [],
+    }
+
+
+def _connection_lost_error(still_running: bool = True) -> dict:
+    """Recoverable: the WebSocket dropped but the kernel is still alive.
+
+    A broken socket is NOT a dead kernel — it is usually a transient network
+    blip or a large output frame (e.g. a matplotlib image) the socket failed
+    to deliver. We say so explicitly instead of claiming the (false) "kernel
+    died / all state lost", so the caller re-runs rather than discarding a
+    perfectly good session.
+    """
+    tail = (
+        "The cell may still be running — re-check or re-run."
+        if still_running else
+        "The cell already finished; some streamed output above may be missing "
+        "— re-run if you need it."
+    )
+    return {
+        "type": "error",
+        "ename": "ConnectionLost",
+        "evalue": (
+            "The WebSocket to JupyterLab dropped mid-execution, but the kernel "
+            "is still alive and its in-memory state is preserved. " + tail +
+            " Do NOT start a new session."
+        ),
         "traceback": [],
     }
 
@@ -136,6 +167,28 @@ class JupyterLabClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _kernel_exec_state(self, kernel_id: str) -> str | None:
+        """The kernel's execution_state via REST ('idle'/'busy'/'starting'),
+        or None if the kernel no longer exists.
+
+        Lets a dropped socket (kernel alive) be told apart from a dead kernel
+        without trusting the socket. Conservative: any transient REST error
+        returns 'busy' (assume alive), so a live kernel is never declared dead
+        on a network blip — only a definitive 404 reports it gone.
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/api/kernels/{kernel_id}",
+                headers=self._headers,
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json().get("execution_state", "busy")
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError):
+            return "busy"
 
     def _get_ws(self, kernel_id: str) -> websocket.WebSocket:
         """Get or create a cached WebSocket connection for a kernel.
@@ -300,7 +353,13 @@ class JupyterLabClient:
                         return [_execution_cancelled_error()]
                     if attempt < max_attempts - 1:
                         continue
-                    return [_kernel_died_error()]
+                    # Could not (re)establish the socket on the final attempt.
+                    # Ask the server whether the kernel is actually dead before
+                    # reporting it as such.
+                    state = self._kernel_exec_state(kernel_id)
+                    if state is None:
+                        return [_kernel_gone_error()]
+                    return [_connection_lost_error(still_running=(state != "idle"))]
 
     def _was_cancelled(self, kernel_id: str) -> bool:
         with self._ws_lock:
@@ -363,6 +422,8 @@ class JupyterLabClient:
         ws.settimeout(RECV_POLL_INTERVAL)
         start_time = time.time()
         saw_reply = False  # any message parented to our request
+        reconnects = 0
+        reconnected = False  # True once we have reconnected after a drop
 
         while True:
             try:
@@ -390,15 +451,41 @@ class JupyterLabClient:
                         "traceback": [],
                     })
                     break
+                # After a reconnect we may have missed the final idle broadcast
+                # (it can arrive during the channel handshake); poll REST so a
+                # finished cell doesn't wait out the whole timeout.
+                if reconnected and self._kernel_exec_state(kernel_id) == "idle":
+                    outputs.append(_connection_lost_error(still_running=False))
+                    break
                 logger.debug("Waiting for kernel output (%.0fs elapsed)", elapsed)
                 continue
             except _WS_CONNECTION_ERRORS:
-                # Evict the broken socket so the next execution starts fresh.
+                # The socket broke — but a broken socket is NOT a dead kernel.
+                # Evict it, then ask the server whether the kernel is actually
+                # still alive before declaring death.
                 self._close_ws(kernel_id)
                 if self._was_cancelled(kernel_id):
                     outputs.append(_execution_cancelled_error())
-                else:
-                    outputs.append(_kernel_died_error())
+                    break
+                state = self._kernel_exec_state(kernel_id)
+                if state is None:                  # kernel really is gone
+                    outputs.append(_kernel_gone_error())
+                    break
+                if state == "idle":                # cell finished during the drop
+                    outputs.append(_connection_lost_error(still_running=False))
+                    break
+                # Kernel still busy: reconnect and keep listening. Do NOT
+                # re-send the code — it is already running on the kernel.
+                if reconnects < _MAX_RECONNECTS:
+                    reconnects += 1
+                    try:
+                        ws = self._get_ws(kernel_id)
+                        ws.settimeout(RECV_POLL_INTERVAL)
+                        reconnected = True
+                        continue
+                    except _WS_CONNECTION_ERRORS:
+                        pass
+                outputs.append(_connection_lost_error(still_running=True))
                 break
 
             msg = json.loads(raw)

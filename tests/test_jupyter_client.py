@@ -132,12 +132,42 @@ class TestExecuteOnFakeWS:
         assert "k1" not in client._ws_cache
         assert ws.closed
 
-    def test_connection_closed_mid_recv_reports_kernel_died(self):
+    def test_ws_drop_with_live_kernel_is_recoverable_not_death(self):
+        """A dropped socket while the kernel is still alive must report a
+        recoverable ConnectionLost (state preserved), NOT KernelDied."""
         ws = FakeWS([websocket.WebSocketConnectionClosedException()])
         client = _client_with_ws("k1", ws)
-        outputs = client.execute_code("k1", "x = 1")
-        assert outputs[-1]["ename"] == "KernelDied"
+        with patch.object(client, "_kernel_exec_state", return_value="idle"):
+            outputs = client.execute_code("k1", "x = 1")
+        assert outputs[-1]["ename"] == "ConnectionLost"
+        assert "state is preserved" in outputs[-1]["evalue"]
         assert "k1" not in client._ws_cache
+
+    def test_ws_drop_with_dead_kernel_reports_gone(self):
+        """If the kernel is genuinely gone (REST 404 -> None), a dropped socket
+        reports KernelGone rather than a recoverable ConnectionLost."""
+        ws = FakeWS([websocket.WebSocketConnectionClosedException()])
+        client = _client_with_ws("k1", ws)
+        with patch.object(client, "_kernel_exec_state", return_value=None):
+            outputs = client.execute_code("k1", "x = 1")
+        assert outputs[-1]["ename"] == "KernelGone"
+
+    def test_ws_drop_while_busy_reconnects_without_resend(self):
+        """A drop while the kernel is busy reconnects (without re-sending the
+        running code); a REST idle-check then ends the wait gracefully."""
+        ws = FakeWS([websocket.WebSocketConnectionClosedException()])
+        client = _client_with_ws("k1", ws)
+        fresh = FakeWS([websocket.WebSocketTimeoutException()])
+        with patch.object(
+            client, "_kernel_exec_state", side_effect=["busy", "idle"]
+        ), patch(
+            "jlab_mcp.jupyter_client.websocket.create_connection",
+            return_value=fresh,
+        ) as cc:
+            outputs = client.execute_code("k1", "long_running()")
+        assert cc.call_count == 1                  # reconnected, did not give up
+        assert outputs[-1]["ename"] == "ConnectionLost"
+        assert fresh.sent == []                    # code NOT re-sent (already running)
 
     def test_cancelled_execution_reports_cancelled_not_dead(self):
         """When cancel_execution closed the socket on purpose, the result
@@ -184,14 +214,15 @@ class TestExecuteOnFakeWS:
     def test_channels_never_ready_fails_instead_of_hanging(self):
         """If the kernel never answers on a fresh socket, execute_code must
         return an error instead of waiting forever on a request that was
-        silently dropped."""
+        silently dropped. With the kernel still alive on the server, that is
+        the recoverable ConnectionLost rather than KernelDied."""
         client = JupyterLabClient("localhost", 8888, "tok")
         with patch(
             "jlab_mcp.jupyter_client.websocket.create_connection",
             side_effect=lambda *a, **k: NeverReadyWS(),
-        ):
+        ), patch.object(client, "_kernel_exec_state", return_value="busy"):
             outputs = client.execute_code("k1", "x = 1")
-        assert outputs[-1]["ename"] == "KernelDied"
+        assert outputs[-1]["ename"] == "ConnectionLost"
 
     def test_fresh_connection_waits_for_channel_ready(self):
         """A fresh socket is handed out only after the kernel answers the
