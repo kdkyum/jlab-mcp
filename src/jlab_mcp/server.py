@@ -12,7 +12,7 @@ from pathlib import Path
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 
-from jlab_mcp import config
+from jlab_mcp import autostart, config
 from jlab_mcp.image_utils import resize_image_if_needed
 from jlab_mcp.jupyter_client import JupyterLabClient
 from jlab_mcp.notebook import NotebookManager
@@ -71,12 +71,13 @@ def _connect_to_server() -> JupyterServer:
 
     if not info or state is None:
         raise RuntimeError(
-            "No JupyterLab server running. Start one with: jlab-mcp start"
+            "No JupyterLab server running. Call the start_server tool to "
+            "launch one, then wait_for_server until it is ready."
         )
     if state != "ready":
         raise RuntimeError(
             f"JupyterLab not ready (state={state}). "
-            "Check progress with: jlab-mcp wait"
+            "Call wait_for_server to monitor startup."
         )
 
     hostname = info["HOSTNAME"]
@@ -87,7 +88,7 @@ def _connect_to_server() -> JupyterServer:
     client = JupyterLabClient(hostname, port, token)
     if not client.health_check():
         raise RuntimeError(
-            "JupyterLab not responding. Restart with: jlab-mcp start"
+            "JupyterLab not responding. Call start_server to restart it."
         )
 
     return JupyterServer(job_id=job_id, client=client, hostname=hostname)
@@ -354,10 +355,182 @@ def _save_outputs_and_format(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+def start_server(
+    mode: str = "",
+    time_limit: str = "",
+    partition: str = "",
+    gres: str = "",
+    cpus: int = 0,
+    mem_mb: int = 0,
+) -> dict:
+    """Start the JupyterLab server in the background (SLURM job or local process).
+
+    Call this yourself whenever no server is running (ping returns
+    "no_server", or a tool errors with "No JupyterLab server running") —
+    do NOT tell the user to run `jlab-mcp start` manually.
+
+    First use in a project: if no run mode has been chosen yet, this
+    returns status="mode_required". Ask the user where JupyterLab should
+    run — "slurm" (submits a job to a SLURM compute node; GPUs, may wait
+    in the queue) or "local" (subprocess on this machine). If they pick
+    "slurm", ALSO ask in the same question set how long the job should
+    run (walltime) and what resources it needs (partition, GPUs, CPUs,
+    memory), presenting the returned slurm_defaults as the recommended
+    option. Then call again with mode and their answers. All choices are
+    saved for this project and reused on later starts without re-asking;
+    passing any of them explicitly updates the saved value.
+
+    If the project has no Python environment yet (e.g. only .mcp.json),
+    the launcher bootstraps it automatically (uv init + uv add
+    jupyterlab) before starting — the first start can take a few minutes.
+
+    After status="starting", immediately call wait_for_server to monitor
+    startup and notify the user when the server is ready.
+
+    Args:
+        mode: "slurm" or "local". Optional once a mode is saved.
+        time_limit: SLURM walltime, e.g. "4:00:00" or "1-00:00:00".
+        partition: SLURM partition, e.g. "gpu1".
+        gres: SLURM GPU spec, e.g. "gpu:a100:1" (or "" for none).
+        cpus: CPUs per task, e.g. 18.
+        mem_mb: Memory in MB, e.g. 125000.
+
+    Returns:
+        Dict with status: "already_running" | "mode_required" | "starting".
+    """
+    state, info = autostart.read_status()
+    if state == "ready":
+        hostname = info.get("HOSTNAME", "")
+        port = info.get("PORT", "")
+        token = info.get("TOKEN", "")
+        if hostname and port and token:
+            client = JupyterLabClient(hostname, int(port), token)
+            if client.health_check():
+                return {
+                    "status": "already_running",
+                    "mode": info.get("MODE", "slurm"),
+                    "hostname": hostname,
+                    "url": f"http://{hostname}:{port}",
+                }
+        # ready-but-unreachable: fall through, `jlab-mcp start` recovers it
+
+    # Explicit args override and update the project's saved SLURM options
+    requested = autostart.validate_slurm_options({
+        "time": time_limit,
+        "partition": partition,
+        "gres": gres,
+        "cpus": cpus,
+        "mem_mb": mem_mb,
+    })
+    slurm_opts = {**autostart.read_slurm_options(), **requested}
+
+    resolved = autostart.resolve_mode(mode or None)
+    if resolved is None:
+        partitions = autostart.survey_slurm_partitions()
+        result = {
+            "status": "mode_required",
+            "message": (
+                "No run mode configured for this project. Ask the user "
+                "where JupyterLab should run:\n"
+                "- 'slurm': submit a job to a SLURM compute node "
+                "(GPUs available; may wait in the queue)\n"
+                "- 'local': run as a subprocess on this machine\n"
+                "If they pick 'slurm', also ask (in the same question set) "
+                "for the job walltime and resources. Use slurm_partitions — "
+                "a live sinfo survey of THIS cluster — to propose concrete "
+                "options (partition, GPU type from gres, CPUs/memory per "
+                "node, walltime within max_time), with slurm_defaults as "
+                "the recommended pick. Then call start_server again with "
+                "mode and the chosen time_limit/partition/gres/cpus/mem_mb."
+            ),
+            "slurm_defaults": {
+                "time_limit": slurm_opts.get("time", config.SLURM_TIME),
+                "partition": slurm_opts.get("partition", config.SLURM_PARTITION),
+                "gres": slurm_opts.get("gres", config.SLURM_GRES),
+                "cpus": int(slurm_opts.get("cpus", config.SLURM_CPUS)),
+                "mem_mb": int(slurm_opts.get("mem_mb", config.SLURM_MEM)),
+            },
+        }
+        if partitions:
+            result["slurm_partitions"] = partitions
+        else:
+            result["message"] += (
+                "\n(No sinfo survey available — investigate the cluster "
+                "yourself, e.g. `sinfo`, before proposing resources, or "
+                "fall back to slurm_defaults.)"
+            )
+        return result
+
+    if requested:
+        autostart.save_slurm_options(slurm_opts)
+
+    if autostart.start_in_flight():
+        result = {
+            "status": "starting",
+            "mode": resolved,
+            "log_file": str(autostart.START_LOG),
+            "message": (
+                "A start is already in progress. Call wait_for_server "
+                "to monitor it."
+            ),
+        }
+        if requested:
+            result["message"] += (
+                " Note: the new SLURM settings were saved but do not "
+                "apply to the attempt already in flight."
+            )
+        return result
+
+    autostart.spawn_start(resolved, slurm_opts if resolved == "slurm" else None)
+    return {
+        "status": "starting",
+        "mode": resolved,
+        "log_file": str(autostart.START_LOG),
+        "message": (
+            "JupyterLab is starting in the background"
+            + (
+                " (SLURM job submitted or resumed; it may wait in the queue)"
+                if resolved == "slurm"
+                else ""
+            )
+            + ". Call wait_for_server now to monitor it and notify the "
+            "user once it is ready."
+        ),
+    }
+
+
+@mcp.tool()
+async def wait_for_server(timeout: int = 600, *, ctx: Context) -> dict:
+    """Wait until the JupyterLab server is ready, with progress keepalives.
+
+    Call right after start_server. Blocks (reporting progress every 15s)
+    through environment bootstrap, SLURM queue wait, and JupyterLab
+    startup. If the CLI's queue wait lapses while the job is still
+    queued, the wait is resumed automatically.
+
+    When it returns status="ready", tell the user the server is up
+    (hostname/url) and continue with the pending work. On "timeout" with
+    a still-queued SLURM job, inform the user and call wait_for_server
+    again to keep waiting — the job stays queued either way.
+
+    Args:
+        timeout: Max seconds to wait (default 600, capped at 3600).
+
+    Returns:
+        Dict with status: "ready" | "error" | "timeout" (+ details).
+    """
+    timeout = max(10, min(int(timeout), 3600))
+    return await _run_with_progress(
+        ctx, autostart.poll_until_ready, float(timeout)
+    )
+
+
+@mcp.tool()
 def start_new_notebook(experiment_name: str) -> dict:
     """Start a new session: start kernel, create notebook.
 
-    Uses the shared JupyterLab server (must be started with `jlab-mcp start`).
+    Uses the shared JupyterLab server (if none is running, call
+    start_server + wait_for_server first).
 
     Args:
         experiment_name: Name for the experiment/notebook.
@@ -675,9 +848,18 @@ async def ping() -> dict:
     state = info.get("STATE")
 
     if not info or state is None:
-        return {"status": "no_server", "message": "Run jlab-mcp start"}
+        return {
+            "status": "no_server",
+            "message": "No JupyterLab server. Call start_server to launch one.",
+        }
     if state != "ready":
-        return {"status": state, "message": f"Server not ready (state={state})"}
+        return {
+            "status": state,
+            "message": (
+                f"Server not ready (state={state}). "
+                "Call wait_for_server to monitor startup."
+            ),
+        }
 
     hostname = info.get("HOSTNAME", "")
     port = info.get("PORT", "")
