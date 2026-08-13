@@ -9,8 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastmcp import Context, FastMCP
-from fastmcp.utilities.types import Image
+from mcp.server.mcpserver import Context, Image, MCPServer
 
 from jlab_mcp import autostart, config
 from jlab_mcp.image_utils import resize_image_if_needed
@@ -19,7 +18,7 @@ from jlab_mcp.notebook import NotebookManager
 
 logger = logging.getLogger("jlab-mcp")
 
-mcp = FastMCP("jlab-mcp")
+mcp = MCPServer("jlab-mcp")
 
 _STATUS_FILE = config.STATUS_FILE
 
@@ -176,7 +175,7 @@ def _validate_notebook_path(notebook_path: str) -> Path:
 def _format_outputs(outputs: list[dict]) -> list:
     """Format kernel outputs into a list of content blocks.
 
-    Returns a list of text strings and Image objects.  FastMCP converts
+    Returns a list of text strings and Image objects.  The MCP SDK converts
     each element into a separate MCP content block (TextContent or
     ImageContent), so this must always return a list — not a bare string.
     """
@@ -646,7 +645,7 @@ def start_notebook(notebook_path: str) -> dict:
     }
 
 
-@mcp.tool(output_schema=None)
+@mcp.tool(structured_output=False)
 async def execute_code(
     session_id: str, code: str, cell_index: int = -1, *, ctx: Context
 ) -> list:
@@ -694,7 +693,7 @@ def edit_cell(session_id: str, cell_index: int, code: str) -> str:
     return f"Cell {resolved} updated (not executed)"
 
 
-@mcp.tool(output_schema=None)
+@mcp.tool(structured_output=False)
 async def run_cell(session_id: str, cell_index: int, ctx: Context) -> list:
     """Run an existing cell without modifying its source.
 
@@ -1001,7 +1000,7 @@ print(json.dumps(result))
     return {"error": "no output from resource check"}
 
 
-@mcp.tool(output_schema=None)
+@mcp.tool(structured_output=False)
 async def execute_scratch(code: str, ctx: Context) -> list:
     """Execute code on a temporary kernel for diagnostics (GPU status, etc.).
 

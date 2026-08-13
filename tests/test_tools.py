@@ -18,39 +18,27 @@ from pathlib import Path
 import pytest
 
 from jlab_mcp import config
+# mcp 2.x @mcp.tool() registers the tool and returns the original function,
+# so the tools are directly callable.
 from jlab_mcp.server import (
     _cleanup_kernels,
-    add_markdown as _add_markdown,
-    delete_cell as _delete_cell,
-    edit_cell as _edit_cell,
-    edit_markdown as _edit_markdown,
-    execute_code as _execute_code,
-    ping as _ping,
-    run_cell as _run_cell,
-    server_status as _server_status,
+    add_markdown,
+    delete_cell,
+    edit_cell,
+    edit_markdown,
+    execute_code,
+    ping,
+    run_cell,
+    server_status,
     sessions,
-    shutdown_session as _shutdown_session,
-    start_new_notebook as _start_new_notebook,
-    start_notebook as _start_notebook,
+    shutdown_session,
+    start_new_notebook,
+    start_notebook,
 )
-
-# FastMCP @mcp.tool() wraps functions into FunctionTool objects.
-# Access the underlying callable via .fn
-start_new_notebook = _start_new_notebook.fn
-start_notebook = _start_notebook.fn
-execute_code = _execute_code.fn
-edit_cell = _edit_cell.fn
-edit_markdown = _edit_markdown.fn
-delete_cell = _delete_cell.fn
-run_cell = _run_cell.fn
-add_markdown = _add_markdown.fn
-shutdown_session = _shutdown_session.fn
-ping = _ping.fn
-server_status = _server_status.fn
 
 
 class _CtxStub:
-    """Minimal stand-in for fastmcp.Context (only report_progress is used)."""
+    """Minimal stand-in for mcp Context (only report_progress is used)."""
 
     async def report_progress(self, progress=None, total=None):
         pass
@@ -150,7 +138,7 @@ class TestExecuteCode:
         assert "CUDA available: True" in text_of(result)
 
     def test_image_output(self, session):
-        from fastmcp.utilities.types import Image
+        from mcp.server.mcpserver import Image
 
         execute(session["session_id"], "%matplotlib inline")
         result = execute(

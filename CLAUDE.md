@@ -27,7 +27,7 @@ uv run python -m pytest tests/test_tools.py -v -s --timeout=600
 
 ## Architecture
 
-MCP server (FastMCP, stdio transport) that manages JupyterLab sessions. Supports two modes: **SLURM** (HPC clusters) and **local** (laptops/workstations). Mode is auto-detected (`sbatch` on PATH → SLURM, else local) or set via `JLAB_MCP_RUN_MODE`.
+MCP server (official `mcp` SDK ≥2.0 `MCPServer`, stdio transport, speaks both the stateless 2026-07-28 protocol and the legacy initialize-handshake protocol) that manages JupyterLab sessions. Supports two modes: **SLURM** (HPC clusters) and **local** (laptops/workstations). Mode is auto-detected (`sbatch` on PATH → SLURM, else local) or set via `JLAB_MCP_RUN_MODE`.
 
 ```
 Claude Code ↔ stdio ↔ MCP Server ↔ HTTP/WS ↔ JupyterLab (SLURM compute node or local subprocess)
@@ -40,7 +40,7 @@ Communication happens via:
 
 ### Module Roles
 
-- **server.py** — FastMCP server with 15 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (kernel_id, JupyterLabClient, notebook_path, NotebookManager). All access to `sessions` dict is guarded by `_sessions_lock`.
+- **server.py** — `MCPServer` (mcp SDK 2.x) with 15 tools + 1 resource. Maintains a global `sessions: dict[str, Session]` mapping session IDs to `Session` dataclasses (kernel_id, JupyterLabClient, notebook_path, NotebookManager). All access to `sessions` dict is guarded by `_sessions_lock`.
 - **autostart.py** — Lets the MCP server drive `jlab-mcp start` itself (`start_server`/`wait_for_server` tools): persists the per-project run-mode choice (`STATUS_DIR/run-mode`), spawns a detached bootstrap+start pipeline (own session, stdio redirected to `STATUS_DIR/start.log` — never the MCP stdio pipe), bootstraps bare projects (`uv init --bare` + `uv add jupyterlab ipykernel matplotlib numpy` when `.venv/bin/jupyter-lab` is missing), and polls the status file (`poll_until_ready`). The CLI remains the sole owner of the startup state machine.
 - **slurm.py** — Renders SLURM template, runs `sbatch`/`squeue`/`scancel`, polls for job state and connection file. All SLURM output parsing is string-based (no `jq`). A nonzero squeue/scancel exit raises `SlurmCommandError`; `is_job_running`/`is_job_alive` treat that as "assume alive" so transient controller failures never get a healthy job cancelled.
 - **local.py** — Local mode: spawns `jupyter lab` as a subprocess, manages PID-based lifecycle. PIDs are verified against `/proc/<pid>/cmdline` before trusting/killing (PID recycling). The token is passed via the `JUPYTER_TOKEN` env var, never argv.
@@ -67,7 +67,8 @@ Communication happens via:
 - Network-bound sync work inside async tools goes through `asyncio.to_thread` — blocking the event loop starves the progress keepalives of concurrent executions
 - `execute_code`/`run_cell` pin the target cell by its nbformat id before the long await and write outputs by id (`update_cell_outputs_by_id`) — positional indices go stale if cells are edited during execution; a failed save appends a warning instead of discarding the outputs
 - `edit_cell` is synchronous (edit only, no execution) — use `run_cell` afterwards to execute; it rejects non-code cells (writing `outputs` to a markdown cell makes the notebook schema-invalid)
-- Tools returning `Image` objects must use `@mcp.tool(output_schema=None)` and return `list` — otherwise FastMCP fails to serialize `Image` as `ImageContent`
+- Tools returning `Image` objects must use `@mcp.tool(structured_output=False)` and return `list` — the SDK then serializes each element as its own content block (`Image` → `ImageContent`)
+- The `mcp` SDK is ≥2.0 (protocol 2026-07-28 + legacy era). `@mcp.tool()` returns the original function (tests call tools directly, no `.fn` unwrapping); `Context`/`Image` import from `mcp.server.mcpserver`; `ctx.report_progress` is a no-op when the client sends no `progressToken`
 - `_sessions_lock` must guard all reads/writes to the `sessions` dict; `_server` reads outside `_get_or_start_server` snapshot it under `_server_lock` (thread safety for concurrent tool calls)
 - Kernel death (OOM, crash) is detected during WebSocket execution via `status: restarting/dead` messages and `WebSocketConnectionClosedException`; the cached WS is evicted on death so buffered death broadcasts can't poison the next execution. A 404 channels handshake returns `KernelGone`
 - On user cancellation (ESC), `_execute_with_cancellation()` calls `client.cancel_execution()` (closes the cached WebSocket to unblock the background thread AND sets a per-kernel cancelled flag so the retry loop doesn't re-send the code) then interrupts the kernel — do NOT add pre-execution `interrupt_kernel` calls (causes WS reconnection storms)
